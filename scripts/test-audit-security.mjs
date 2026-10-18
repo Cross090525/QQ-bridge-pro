@@ -15,6 +15,11 @@ dns.promises.lookup = async (host) => {
   if (host === 'public.test') return [{ address: '93.184.216.34', family: 4 }];
   if (host === 'mixed.test') return [{ address: '93.184.216.34', family: 4 }, { address: '::1', family: 6 }];
   if (host === 'expanded.test') return [{ address: '0:0:0:0:0:ffff:7f00:1', family: 6 }];
+  // 双栈主机：IPv6 在前（真实 DNS 的常见顺序），用于验证「IPv4 优先 + 失败切换」。
+  if (host === 'dual.test') return [
+    { address: '2606:4700:4700::1111', family: 6 },
+    { address: '93.184.216.34', family: 4 },
+  ];
   throw new Error(`Unexpected DNS lookup in offline test: ${host}`);
 };
 let fetchModule;
@@ -36,6 +41,11 @@ function mockTransport(t, scripts) {
       if (error) queueMicrotask(() => req.emit('error', error));
     };
     req.end = () => queueMicrotask(() => {
+      if (script.failWith) {
+        // 模拟「这个地址连不上」：连接阶段报错，而不产生响应。
+        req.emit('error', new Error(script.failWith));
+        return;
+      }
       const res = new PassThrough();
       res.statusCode = script.status || 200;
       res.headers = script.headers || {};
@@ -103,6 +113,21 @@ test('HTTP transport pins the validated IP and preserves Host and TLS SNI', asyn
   assert.equal(requests[0].options.headers.host, 'public.test');
   assert.equal(requests[0].options.servername, 'public.test');
   assert.equal(requests[0].options.path, '/page?q=1');
+});
+
+test('dual-stack hosts try IPv4 first and fail over to the next validated address', async (t) => {
+  // 真实故障形态：QQ 表情 CDN 的 AAAA 记录排在前面，而本机没有 IPv6 出口 ——
+  // 只取第一个地址的旧实现会一路等到 20 秒超时（表现为「部分表情/图片发不出去」）。
+  const before = lookupCalls.length;
+  const { requests } = mockTransport(t, [{ failWith: 'connect ETIMEDOUT' }, { body: 'second address ok' }]);
+  const result = await safeFetch('https://dual.test/sticker');
+  assert.equal(result.body, 'second address ok');
+  assert.deepEqual(lookupCalls.slice(before), ['dual.test']);
+  assert.equal(requests.length, 2, '第一个地址失败后必须换下一个地址重试');
+  assert.equal(requests[0].options.hostname, '93.184.216.34', 'IPv4 必须优先（即使 DNS 先给 AAAA）');
+  assert.equal(requests[1].options.hostname, '2606:4700:4700::1111', '失败后切到另一个已校验地址');
+  assert.equal(requests[1].options.headers.host, 'dual.test', '换地址不能改变 Host');
+  assert.equal(requests[1].options.servername, 'dual.test', '换地址不能改变 TLS SNI');
 });
 
 test('redirect bodies are closed immediately and internal redirects are rejected', async (t) => {

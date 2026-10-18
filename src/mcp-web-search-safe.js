@@ -4,6 +4,9 @@
 // - 只暴露只读工具 `web_search` 与 `web_fetch`：查网络用语/梗/黑话、抓取网页正文。
 // - 不暴露任何本地文件、命令执行、写操作。
 // - 查询词做基础清洗：去 CQ 码、控制字符、超长截断。
+// - 搜索：优先走 **DSH 同一路 DeepSeek 联网搜索**（src/web-search.js：同一端点/模型/
+//   服务端 web_search 工具，凭据取 config/env/DSH 的 .credentials.yaml），
+//   不可用时回退 Bing（RSS 优先）。搜索词不再默认发给 Bing。
 // - `web_fetch` 仅允许 http/https：
 //   - 禁止 URL 内嵌凭据；
 //   - 禁止 localhost / .local / 私有 IP / 环回 / 链路本地 / CGNAT 等内网地址；
@@ -11,10 +14,30 @@
 //   - 手动跟随重定向，每一跳都重新校验；
 //   - 响应体按字节流限量读取，避免超大响应拖垮进程。
 // - 搜索结果/抓取结果仅作为“候选解释”，最终是否入库仍由控制台人工确认。
+import path from 'node:path';
 import { safeFetch } from './safe-fetch.js';
+import { webSearch } from './web-search.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+
+/**
+ * 项目根目录（用于读 config.json 的 webSearch 段）。
+ *
+ * 不能用 `import.meta.url`：离线测试会把本文件塞进 vm 上下文执行（那里没有 import.meta，
+ * 直接是语法错误）。DSH 以 `node <本文件绝对路径>` 启动 MCP，所以 argv[1] 就是本文件；
+ * 取它的上一级 `src/` 的父目录即可。取不到时退回 cwd（测试环境正好从仓库根运行）。
+ */
+function projectRoot() {
+  try {
+    const entry = String(process.argv[1] ?? '');
+    if (entry) {
+      const dir = path.dirname(path.resolve(entry));
+      if (path.basename(dir) === 'src') return path.dirname(dir);
+    }
+  } catch {}
+  return process.cwd();
+}
 
 function sanitizeQuery(query) {
   return String(query ?? '')
@@ -26,55 +49,19 @@ function sanitizeQuery(query) {
     .slice(0, 120);
 }
 
-function decodeHtml(s) {
-  return String(s ?? '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-async function bingSearch(query) {
-  const url = new URL('https://cn.bing.com/search');
-  url.searchParams.set('q', query);
-  // 搜索也使用同一条受限传输链路，重定向必须重新校验，正文最多 512K 字符。
-  const res = await safeFetch(url.toString(), 512000);
-  if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(`搜索服务 HTTP ${res.statusCode}`);
-  const html = res.body;
-  const results = [];
-  const blocks = html.split('<li class="b_algo"').slice(1);
-  for (const block of blocks) {
-    const hrefMatch = block.match(/<a[^>]+href="(https?:\/\/[^"]+)"/i);
-    if (!hrefMatch) continue;
-    const urlStr = decodeHtml(hrefMatch[1]);
-    const titleMatch = block.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
-    const title = titleMatch ? decodeHtml(titleMatch[1]) : '';
-    const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-    const snippet = snippetMatch ? decodeHtml(snippetMatch[1]) : '';
-    if (urlStr && title) results.push({ title, url: urlStr, snippet });
-    if (results.length >= 8) break;
-  }
-  return { query, results };
-}
-
-const server = new McpServer({ name: 'web-search-safe', version: '0.2.0-r3' });
+const server = new McpServer({ name: 'web-search-safe', version: '0.2.0-r4' });
 
 server.tool(
   'web_search',
-  '只读搜索网络用语/梗/黑话的含义，返回 Bing 搜索结果（标题/URL/摘要）。仅用于理解词义，不执行任何本地操作。',
-  { query: z.string().describe('要搜索确认的网络用语/黑话/梗') },
+  '只读联网搜索：优先使用与 DSH 相同的 DeepSeek 联网搜索（结果更准、不把群里的词发给搜索引擎广告网络），不可用时自动回退 Bing。返回标题/URL/摘要，不执行任何本地操作。适合查网络用语、梗、事实性问题和热点。',
+  { query: z.string().describe('要搜索确认的网络用语/黑话/梗/事实性问题') },
   async ({ query }) => {
     const clean = sanitizeQuery(query);
     if (!clean) {
       return { content: [{ type: 'text', text: '查询词为空，已拒绝。' }], isError: true };
     }
     try {
-      const result = await bingSearch(clean);
+      const result = await webSearch(clean, { root: projectRoot() });
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
       return {

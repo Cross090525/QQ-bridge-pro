@@ -109,7 +109,31 @@ export function isPrivateIp(ip) {
   return true;
 }
 
-export async function resolveSafeHost(hostname) {
+/**
+ * 把校验过的地址排成「尝试顺序」。
+ *
+ * 为什么不能只取第一个：DNS 返回顺序是**轮转/不确定**的，而本机常常只有 IPv4 出口。
+ * QQ 的表情 CDN（gxh.vip.qq.com / p.qpic.cn / multimedia.nt.qq.com.cn）和
+ * raw.githubusercontent.com 都同时有 AAAA/A 记录 —— 抢到第一个 AAAA 的那次请求会一路
+ * 连到 20 秒超时，其余请求正常，于是表现为「**部分**表情包/图片/网页时好时坏」。
+ * 这里优先 IPv4，并把两个族交替排布：v4 全部不可用时还能试 v6（v6-only 主机同理）。
+ * @param {{address: string, family: number}[]} addresses
+ * @returns {string[]} 地址字符串（已按尝试顺序排列）
+ */
+function orderAddresses(addresses) {
+  const v4 = addresses.filter((item) => Number(item?.family) === 4).map((item) => item.address);
+  const v6 = addresses.filter((item) => Number(item?.family) === 6).map((item) => item.address);
+  const ordered = [];
+  const max = Math.max(v4.length, v6.length);
+  for (let i = 0; i < max; i += 1) {
+    if (v4[i]) ordered.push(v4[i]);
+    if (v6[i]) ordered.push(v6[i]);
+  }
+  return ordered;
+}
+
+/** 解析主机名并校验**全部**解析结果，返回可尝试的地址列表（IPv4 优先）。 */
+export async function resolveSafeAddresses(hostname) {
   const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
   if (!h) throw new Error('主机名为空');
   if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) {
@@ -117,7 +141,7 @@ export async function resolveSafeHost(hostname) {
   }
   if (net.isIP(h)) {
     if (isPrivateIp(h)) throw new Error('禁止访问内网/本机地址');
-    return h;
+    return [h];
   }
   let addresses;
   try {
@@ -131,7 +155,13 @@ export async function resolveSafeHost(hostname) {
       throw new Error('域名解析到内网/本机地址，已阻止');
     }
   }
-  return addresses[0].address;
+  const ordered = orderAddresses(addresses);
+  return ordered.length ? ordered : [addresses[0].address];
+}
+
+export async function resolveSafeHost(hostname) {
+  const [first] = await resolveSafeAddresses(hostname);
+  return first;
 }
 
 export async function validateFetchUrl(raw) {
@@ -143,65 +173,73 @@ export async function validateFetchUrl(raw) {
   }
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('仅允许 http/https');
   if (url.username || url.password) throw new Error('URL 不能包含凭据');
-  const ip = await resolveSafeHost(url.hostname);
-  return { url, ip };
+  const addresses = await resolveSafeAddresses(url.hostname);
+  return { url, ip: addresses[0], addresses };
 }
 
 const REQUEST_TIMEOUT_MS = 20000;
+// 多地址时的单次尝试预算：够一次 TCP+TLS+首字节，又不至于让「第一个地址是坏的 IPv6」
+// 把整个 20 秒总预算耗光。
+const ATTEMPT_TIMEOUT_MS = 8000;
+const MAX_ADDRESS_ATTEMPTS = 4;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 function validateLimit(value, name) {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} 必须为正整数`);
 }
 
-// 使用已校验的 IP 发起请求，保留原始 Host/SNI，禁止重新解析 DNS。
-// 总时限包含 TCP/TLS、响应头和响应体；仅 socket idle timeout 无法阻止慢速滴流。
-function requestOnce(url, ip, limit, binary = false) {
-  return new Promise((resolve, reject) => {
+/**
+ * 用**一个**已校验的地址发起一次尝试，保留原始 Host/SNI（禁止重新解析 DNS）。
+ * 返回 `{ok:true,result}` 或 `{ok:false,error,retryable}`；retryable 只标记网络层失败
+ * （连接失败/超时/正文中断），大小与图片签名等策略性拒绝不重试。
+ */
+function attemptOnce(url, address, limit, binary, budgetMs) {
+  return new Promise((resolve) => {
     let settled = false;
     let req;
     let response;
-    const finish = (error, result) => {
+    const settle = (outcome) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (error) reject(error);
-      else resolve(result);
+      resolve(outcome);
     };
+    const fail = (error, retryable) => settle({ ok: false, error, retryable: retryable === true });
+    const done = (result) => settle({ ok: true, result });
     const timer = setTimeout(() => {
       const error = new Error(`请求超时：${url.hostname}`);
-      finish(error);
+      fail(error, true);
       req?.destroy(error);
       response?.destroy();
-    }, REQUEST_TIMEOUT_MS);
+    }, budgetMs);
     const mod = url.protocol === 'https:' ? https : http;
     const hostname = url.hostname.replace(/^\[|\]$/g, '');
     try {
       req = mod.request({
-        hostname: ip,
+        hostname: address,
         port: url.port || (url.protocol === 'https:' ? 443 : 80),
         path: url.pathname + url.search,
         method: 'GET',
         headers: {
           host: url.host,
-          'user-agent': 'Mozilla/5.0',
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36',
           accept: binary ? 'image/*,*/*;q=0.8' : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'accept-language': 'zh-CN,zh;q=0.9',
         },
         servername: url.protocol === 'https:' && !net.isIP(hostname) ? hostname : undefined,
         rejectUnauthorized: url.protocol === 'https:',
-        timeout: REQUEST_TIMEOUT_MS,
+        timeout: budgetMs,
       }, (res) => {
         response = res;
-        res.on('error', (error) => finish(error));
-        res.on('aborted', () => finish(new Error('响应体读取中断')));
+        res.on('error', (error) => fail(error, true));
+        res.on('aborted', () => fail(new Error('响应体读取中断'), true));
         res.on('close', () => {
-          if (!res.complete) finish(new Error('响应体读取中断'));
+          if (!res.complete) fail(new Error('响应体读取中断'), true);
         });
         if (settled) { res.destroy(); return; }
         const statusCode = res.statusCode || 0;
         if (REDIRECT_STATUSES.has(statusCode)) {
-          finish(null, { statusCode, redirect: String(res.headers.location || '') });
+          done({ statusCode, redirect: String(res.headers.location || '') });
           // 不下载重定向正文：攻击者可以发送无限正文消耗连接和带宽。
           res.destroy();
           return;
@@ -215,7 +253,7 @@ function requestOnce(url, ip, limit, binary = false) {
           chunks.push(points.slice(0, remaining).join(''));
           size += Math.min(points.length, remaining);
           if (size >= limit) {
-            finish(null, { statusCode, body: chunks.join(''), truncated: true });
+            done({ statusCode, body: chunks.join(''), truncated: true });
             res.destroy();
           }
         };
@@ -224,7 +262,7 @@ function requestOnce(url, ip, limit, binary = false) {
           if (!binary) { appendText(decoder.write(chunk)); return; }
           size += chunk.length;
           if (size > limit) {
-            finish(new Error(`图片超过大小限制（${limit} 字节）`));
+            fail(new Error(`图片超过大小限制（${limit} 字节）`), false);
             res.destroy();
             return;
           }
@@ -232,38 +270,73 @@ function requestOnce(url, ip, limit, binary = false) {
         });
         res.on('end', () => {
           if (settled) return;
-          if (binary) finish(null, { statusCode, buffer: Buffer.concat(chunks) });
+          if (binary) done({ statusCode, buffer: Buffer.concat(chunks) });
           else {
             appendText(decoder.end());
-            finish(null, { statusCode, body: chunks.join(''), truncated: false });
+            done({ statusCode, body: chunks.join(''), truncated: false });
           }
         });
       });
       req.on('timeout', () => {
         const error = new Error(`请求超时：${url.hostname}`);
-        finish(error);
+        fail(error, true);
         req.destroy(error);
         response?.destroy();
       });
-      req.on('error', (error) => finish(error));
+      req.on('error', (error) => fail(error, true));
       req.end();
     } catch (error) {
-      finish(error);
+      fail(error, true);
       req?.destroy();
     }
   });
 }
 
+/**
+ * 依次尝试已校验的地址（IPv4 优先，见 orderAddresses）。
+ *
+ * 单地址时沿用原来的「整个 20 秒总预算」，多地址时才启用单次尝试预算与失败切换：
+ * 这样「只有一个地址、对方慢慢滴流」仍然会等满总时限（由总 deadline 兜底），
+ * 而「第一个地址是坏的 IPv6」不会再白等 20 秒。
+ * 所有地址都失败时抛最后一个错误（保留原始错误文案，便于日志排查）。
+ */
+async function requestOnce(url, addresses, limit, binary = false) {
+  const list = (Array.isArray(addresses) ? addresses : [addresses]).filter(Boolean);
+  if (!list.length) throw new Error(`没有可用地址：${url.hostname}`);
+  const deadline = Date.now() + REQUEST_TIMEOUT_MS;
+  let lastError = null;
+  const attempts = Math.min(list.length, MAX_ADDRESS_ATTEMPTS);
+  for (let i = 0; i < attempts; i += 1) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 250) break;
+    const budget = list.length === 1
+      ? REQUEST_TIMEOUT_MS
+      : Math.min(ATTEMPT_TIMEOUT_MS, remaining);
+    const outcome = await attemptOnce(url, list[i], limit, binary, budget);
+    if (outcome.ok) return outcome.result;
+    lastError = outcome.error;
+    if (!outcome.retryable) throw outcome.error;
+    if (i < attempts - 1) {
+      // 换地址重试：只换连接目标，Host/SNI/路径全部不变（同一个站点）。
+      continue;
+    }
+  }
+  if (lastError && attempts > 1) {
+    lastError.message = `${lastError.message}（已尝试 ${attempts} 个地址）`;
+  }
+  throw lastError ?? new Error(`请求失败：${url.hostname}`);
+}
+
 export async function safeFetch(urlString, maxChars = 50000) {
   validateLimit(maxChars, 'maxChars');
   const MAX_REDIRECTS = 5;
-  let { url, ip } = await validateFetchUrl(urlString);
+  let { url, addresses } = await validateFetchUrl(urlString);
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const result = await requestOnce(url, ip, maxChars);
+    const result = await requestOnce(url, addresses, maxChars);
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
-      ({ url, ip } = await validateFetchUrl(next));
+      ({ url, addresses } = await validateFetchUrl(next));
       continue;
     }
     const body = result.body || '';
@@ -288,16 +361,16 @@ export function looksLikeImageBuffer(buf) {
 }
 
 /** 抓取图片字节并返回 Buffer（带 SSRF 防护，且校验确实为图片）。 */
-export async function safeFetchBuffer(urlString, maxBytes = 4 * 1024 * 1024) {
+export async function safeFetchBuffer(urlString, maxBytes = 8 * 1024 * 1024) {
   validateLimit(maxBytes, 'maxBytes');
   const MAX_REDIRECTS = 5;
-  let { url, ip } = await validateFetchUrl(urlString);
+  let { url, addresses } = await validateFetchUrl(urlString);
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const result = await requestOnce(url, ip, maxBytes, true);
+    const result = await requestOnce(url, addresses, maxBytes, true);
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
-      ({ url, ip } = await validateFetchUrl(next));
+      ({ url, addresses } = await validateFetchUrl(next));
       continue;
     }
     if (result.statusCode < 200 || result.statusCode >= 300) {

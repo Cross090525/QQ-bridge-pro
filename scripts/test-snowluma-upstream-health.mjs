@@ -30,8 +30,11 @@ const example = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.example.json'
 
 /** 只要可执行代码：注释里会大段解释这些名字（直接扫原文会把说明当成实现）。 */
 const codeOf = (src) => src
-  .replace(/\/\*[\s\S]*?\*\//g, '')
-  .split(/\r?\n/).map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+  // 顺序很重要：先剥行注释，再剥块注释。行注释里出现的 `/*`（例如 `/api/send/*`）
+  // 若先做块注释扫描，会被当成块注释开头、一路吞到后面某个 `*/` —— 实测吞掉过
+  // 二十多万字符的代码，让本文件的断言对着"不存在的源码"误报。
+  .split(/\r?\n/).map((l) => l.replace(/\/\/.*$/, '')).join('\n')
+  .replace(/\/\*[\s\S]*?\*\//g, '');
 const bridgeCode = codeOf(bridge);
 
 test('SnowLuma 客户端库不低于 bot_status 出现的版本（1.14.17）', () => {

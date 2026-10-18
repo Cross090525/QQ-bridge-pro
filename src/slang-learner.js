@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { truncateText } from './md-to-plain.js';
 
 export const SLANG_STATUS = Object.freeze({
   CANDIDATE: 'candidate',
@@ -54,7 +55,9 @@ export function normalizeSlangEntry(raw) {
     : SLANG_STATUS.CANDIDATE;
   const clip = (value, max) => {
     const s = String(value ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim();
-    return s.length > max ? s.slice(0, max) : s;
+    // 用 truncateText 而不是 slice：emoji 占两个码元，按码元切会留下孤立高代理
+    // （写进 slang.json / 提示词后一律渲染成 �）。
+    return truncateText(s, max);
   };
   return {
     id: String(entry.id || createId()),
@@ -304,10 +307,16 @@ export function extractJsonArray(text) {
   } catch {}
   if (raw.length > 400_000) return null; // 超长文本不做候选扫描，避免 O(n²) 卡住事件循环
   const MAX_CANDIDATES = 32;
+  // 扫描尝试次数也必须设上限：candidates 只在**找到配对的 `]`** 时才增加，
+  // 于是「一整篇都是 `[`」的文本会让外层对每个 `[` 都扫到串尾 —— O(n²)，
+  // 实测 10 万个 `[` 能卡住事件循环 10 秒以上（桥接的 QQ 收发与定时器都在同一个循环里）。
+  let attempts = 0;
+  const MAX_SCAN_ATTEMPTS = 64;
   const candidates = [];
   for (let i = 0; i < raw.length; i += 1) {
     if (raw[i] !== '[') continue;
-    if (candidates.length >= MAX_CANDIDATES) break;
+    if (candidates.length >= MAX_CANDIDATES || attempts >= MAX_SCAN_ATTEMPTS) break;
+    attempts += 1;
     let depth = 0;
     let inString = false;
     let escaped = false;

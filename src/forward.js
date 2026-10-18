@@ -7,6 +7,8 @@
 // - forward id 只允许安全字符，长度受限，避免把任意内容当参数传给 OneBot/日志
 // - 只格式化，不访问网络；调用方负责“id 必须来自当前会话已见消息”的校验
 
+import { truncateText } from './md-to-plain.js';
+
 export function sanitizeForwardId(value) {
   const s = String(value ?? '').trim();
   if (!s || s.length > 256) return '';
@@ -82,13 +84,14 @@ function senderName(node) {
   if (!node || typeof node !== 'object') return '';
   const data = node.data && typeof node.data === 'object' ? node.data : {};
   const sender = node.sender;
+  // 用 truncateText：群名片里带 emoji 时按码元 slice 会留下孤立高代理。
   if (sender && typeof sender === 'object') {
     const name = sender.nickname || sender.card || sender.user_id || '';
-    if (name) return String(name).slice(0, 100);
+    if (name) return truncateText(String(name), 100);
   }
-  if (typeof sender === 'string' && sender) return String(sender).slice(0, 100);
+  if (typeof sender === 'string' && sender) return truncateText(String(sender), 100);
   const name = data.name || data.nickname || data.card || data.uin || data.user_id || node.name || node.nickname || '';
-  return String(name ?? '').slice(0, 100);
+  return truncateText(String(name ?? ''), 100);
 }
 
 function senderUserId(node) {

@@ -319,6 +319,8 @@ export function makeFixtureState() {
     },
     socialStates: { 'group:123456789': { phase: 'active' }, 'group:100003': { phase: 'idle' } },
     v2: { enabled: true, agentPreset: 'qq-chat-v2', provideRecommendations: true, tools: {} },
+    // 会话初始提示词（离线示例）：整段内容都是虚构的演示文本。
+    initPrompt: '离线示例：这是一个演示用的群聊环境说明，不会写进任何真实配置。',
     slangConfig: { enabled: true, extractMinMessages: 10, extractCooldownMs: 300000, inferenceThresholds: [2, 4, 8], injectMax: 8, learnerPreset: 'qq-chat', workspaceTitle: 'QQ 黑话学习', autoResearch: true },
     slang: [
       { id: 'demo-candidate', content: '有被治愈到', meaning: '感到温暖和安慰', status: 'candidate', count: 4, source: 'auto', evidence: [{ sender: '演示群友', text: '今天这张图，有被治愈到。' }], createdAt: timestamp, updatedAt: timestamp },
@@ -455,6 +457,23 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
           case '/api/socialV2/memory': return json({ ok: true, raw: { activeTopics: [{ text: '周末的阅读计划', pendingQuestion: '有没有推荐的书？' }], pendingThoughts: [{ text: '分享一张风景照片', motivation: '轻松交流' }], memberImpressions: { 演示群友: { traits: ['友善', '喜欢技术'], interactionCount: 6 } } } });
           case '/api/socialV2/state': return json({ ok: true, key: url.searchParams.get('key'), wakeConfig: { mode: 'diving', infinite: false, sleepUntil: '2026-09-20T09:00:00.000Z', triggers: { atMention: true, keywords: ['小鲸鱼'] }, wakeCount: 4 }, wakeSafety: { guaranteed: true }, unreadCount: 2, lastWakeReason: 'atMention' });
           case '/api/socialV2/states': return json({ ok: true, conversations: state.sessions.map(x => ({ key: x.key, phase: 'diving', unreadCount: 2 })) });
+          case '/api/socialV2/initial-prompt': {
+            const key = url.searchParams.get('key') || '';
+            if (!key) {
+              return json({
+                ok: true,
+                maxChars: 2000,
+                writable: true,
+                entries: state.initPrompt
+                  ? [{ key: 'group:123456789', chars: String(state.initPrompt).length, updatedAt: Date.now(), preview: String(state.initPrompt).slice(0, 80) }]
+                  : []
+              });
+            }
+            return json({
+              ok: true, key, exists: !!state.initPrompt, text: state.initPrompt || '',
+              createdAt: Date.now(), updatedAt: Date.now(), maxChars: 2000, writable: true
+            });
+          }
           // 语音库（离线示例：不含任何真实音频路径）
           case '/api/voice/list':
           case '/api/socialV2/voices': return json({
@@ -532,6 +551,14 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
           case '/api/socialV2/tool-log/clear': state.toolLog = []; return json({ ok: true });
           case '/api/socialV2/feedback-clear': state.feedback = []; return json({ ok: true });
           case '/api/socialV2/reset': return json({ ok: true });
+          case '/api/socialV2/initial-prompt': {
+            const text = body.delete === true ? '' : String(body.text ?? '');
+            state.initPrompt = text;
+            return json({
+              ok: true, key: body.key || '', deleted: !text, chars: text.length,
+              exists: !!text, updatedAt: Date.now(), maxChars: 2000
+            });
+          }
           case '/api/slang/config': state.slangConfig = body; return json({ ok: true });
           case '/api/slang': state.slang.push({ ...body, id: `demo-${state.slang.length + 1}`, status: 'confirmed', source: 'manual', count: 1 }); return json({ ok: true });
           case '/api/security':

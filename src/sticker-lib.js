@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { truncateText } from './md-to-plain.js';
 
 export function nowIso() {
   return new Date().toISOString();
@@ -36,13 +37,14 @@ export function nowIso() {
  */
 export function sanitizeStickerText(value, max = 200) {
   const limit = Math.max(1, Number(max) || 200);
-  return String(value ?? '')
+  const cleaned = String(value ?? '')
     // 换行 / 制表 / 全角空格等一切空白压成单个半角空格
     .replace(/[\s\u00a0\u3000]+/g, ' ')
     // 去掉其余控制字符与零宽字符（可能被用来伪装成不可见的分段符）
     .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\ufeff]/g, '')
-    .trim()
-    .slice(0, limit);
+    .trim();
+  // 按码点截断，不切开代理对（孤立高代理会渲染成 � 并污染每个会话的表情摘要）。
+  return truncateText(cleaned, limit);
 }
 
 export function normalizeStickerEntry(raw) {

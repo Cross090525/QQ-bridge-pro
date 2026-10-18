@@ -961,6 +961,10 @@ export function createTurnCollector() {
     },
     has(turn) {
       return turns.has(turn);
+    },
+    /** 当前仍在跟踪（有 start 无 end）的回合数。供调用方判断 collector 是否已成空壳。 */
+    size() {
+      return turns.size;
     }
   };
 }

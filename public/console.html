@@ -2256,6 +2256,28 @@ button:active:not(:disabled) {
       <div id="v2WakeStatusOutput" class="tool-log-table">（空）</div>
 
 </div></details>
+<details class="settings-group"><summary>初始提示词（预写某个群/私聊的环境，只在 AI 首次唤醒时看一次）</summary><div class="settings-content">
+      <div class="meta" style="margin-bottom:8px">
+        在这里提前告诉 AI「这个群是什么圈子、什么氛围、聊什么、有什么忌讳」。AI 只在<b>该会话的第一次唤醒</b>时收到一次，
+        之后不会重复注入（那时它已经在会话上下文里了）；AI 读不到也改不了这份设置。
+        如果 AI 已经在这个会话里首次唤醒过，需要重置该会话（「会话映射」里重置，或「重置二代状态」）后，下一次首次唤醒才会带上它。
+        留空保存等于删除；只写环境背景，别写指令式的要求（那是人格卡/仿真提示词的事）。
+      </div>
+      <div class="row">
+        <input type="text" id="v2InitPromptKey" placeholder="group:123456789（可从「白名单会话快速选择」带过来）" style="flex:1" aria-label="初始提示词的会话 key">
+        <button id="v2InitPromptLoad" class="small">加载</button>
+        <button id="v2InitPromptSave" class="small">保存</button>
+        <button id="v2InitPromptClear" class="small danger">删除</button>
+        <span class="meta" id="v2InitPromptMsg"></span>
+      </div>
+      <textarea id="v2InitPromptText" rows="5" aria-label="初始提示词正文" placeholder="例如：这是一个偏技术的闲聊群，群友喜欢玩梗、聊模型和本地部署；氛围轻松，别长篇大论，遇到配置问题直接给结论。"></textarea>
+      <div class="meta">
+        当前 <span id="v2InitPromptCount">0</span> / <span id="v2InitPromptMax">2000</span> 字符（上限可在 config.json 的
+        <code>socialV2.initialPromptMaxChars</code> 调整）。
+      </div>
+      <div id="v2InitPromptList" class="tool-log-table">（点「加载」且 key 留空时，列出所有已设置的会话）</div>
+
+</div></details>
 <details class="settings-group"><summary>白名单会话快速选择</summary><div class="settings-content">
       <div class="row">
         <select id="v2SessionSelect" style="flex:1"><option value="">选择白名单群/私聊…</option></select>
@@ -3698,6 +3720,98 @@ function loadV2WakeStatus() {
 }
 document.getElementById('v2WakeStatusLoad').addEventListener('click', loadV2WakeStatus);
 
+// ── 初始提示词（每个会话一份，只在 AI 首次唤醒时注入一次） ────────────────────
+const v2InitPromptTextEl = document.getElementById('v2InitPromptText');
+function v2InitPromptKeyValue() { return document.getElementById('v2InitPromptKey').value.trim(); }
+function setV2InitPromptMsg(text, kind) {
+  const msg = document.getElementById('v2InitPromptMsg');
+  msg.textContent = text;
+  msg.className = 'meta' + (kind ? ' ' + kind : '');
+}
+function updateV2InitPromptCount() {
+  document.getElementById('v2InitPromptCount').textContent = String(v2InitPromptTextEl.value.length);
+}
+function applyV2InitPromptMax(maxChars) {
+  const max = Math.round(Number(maxChars));
+  if (!Number.isFinite(max) || max <= 0) return;
+  document.getElementById('v2InitPromptMax').textContent = String(max);
+  v2InitPromptTextEl.maxLength = max;
+}
+function renderV2InitPromptEntries(entries) {
+  const box = document.getElementById('v2InitPromptList');
+  if (!Array.isArray(entries) || !entries.length) { box.textContent = '（还没有任何会话设置初始提示词）'; return; }
+  box.innerHTML = entries.map((e) => {
+    const when = Number(e.updatedAt) > 0 ? new Date(Number(e.updatedAt)).toLocaleString() : '未知时间';
+    return `<div style="margin:3px 0"><code>${esc(e.key)}</code> · ${Number(e.chars) || 0} 字符 · ${esc(when)} <button class="small" data-init-prompt-key="${esc(e.key)}">编辑</button></div>`;
+  }).join('');
+}
+async function loadV2InitialPrompt() {
+  const key = v2InitPromptKeyValue();
+  setV2InitPromptMsg('加载中…');
+  try {
+    const r = await api('/api/socialV2/initial-prompt' + (key ? '?key=' + encodeURIComponent(key) : ''));
+    if (!r.ok) { setV2InitPromptMsg('❌ ' + (r.error || '失败'), 'err'); return; }
+    applyV2InitPromptMax(r.maxChars);
+    const readOnly = r.writable === false;
+    if (!key) {
+      renderV2InitPromptEntries(r.entries);
+      setV2InitPromptMsg(readOnly ? '⚠️ 文件不可写（只读降级），只显示已有内容' : `✅ 共 ${(r.entries || []).length} 条`, readOnly ? 'err' : 'ok');
+      return;
+    }
+    v2InitPromptTextEl.value = r.text || '';
+    updateV2InitPromptCount();
+    document.getElementById('v2InitPromptList').textContent = r.exists
+      ? '该会话已设置初始提示词；再点「保存」会覆盖。'
+      : '该会话还没有设置初始提示词；填写后点「保存」新建。';
+    if (readOnly) setV2InitPromptMsg('⚠️ 文件不可写（只读降级）：能看不能存', 'err');
+    else setV2InitPromptMsg(r.exists ? '✅ 已加载' : '（空）', r.exists ? 'ok' : '');
+  } catch (e) {
+    setV2InitPromptMsg('❌ ' + (e.message || e), 'err');
+  }
+}
+async function saveV2InitialPrompt() {
+  const key = v2InitPromptKeyValue();
+  if (!key) { setV2InitPromptMsg('请输入会话 key（group:群号 或 private:QQ号）', 'err'); return; }
+  setV2InitPromptMsg('保存中…');
+  try {
+    const r = await api('/api/socialV2/initial-prompt', 'POST', { key, text: v2InitPromptTextEl.value });
+    if (!r.ok) { setV2InitPromptMsg('❌ ' + (r.error || '失败'), 'err'); return; }
+    applyV2InitPromptMax(r.maxChars);
+    if (r.deleted) {
+      v2InitPromptTextEl.value = '';
+      updateV2InitPromptCount();
+      setV2InitPromptMsg('✅ 内容为空，已删除该会话的初始提示词', 'ok');
+    } else {
+      setV2InitPromptMsg(`✅ 已保存（${r.chars} 字符），该会话下一次首次唤醒时注入`, 'ok');
+    }
+  } catch (e) {
+    setV2InitPromptMsg('❌ ' + (e.message || e), 'err');
+  }
+}
+document.getElementById('v2InitPromptLoad').addEventListener('click', loadV2InitialPrompt);
+document.getElementById('v2InitPromptSave').addEventListener('click', saveV2InitialPrompt);
+document.getElementById('v2InitPromptClear').addEventListener('click', async () => {
+  const key = v2InitPromptKeyValue();
+  if (!key) { setV2InitPromptMsg('请输入会话 key', 'err'); return; }
+  if (!confirm(`确定删除 ${key} 的初始提示词？`)) return;
+  try {
+    const r = await api('/api/socialV2/initial-prompt', 'POST', { key, delete: true });
+    if (!r.ok) { setV2InitPromptMsg('❌ ' + (r.error || '失败'), 'err'); return; }
+    v2InitPromptTextEl.value = '';
+    updateV2InitPromptCount();
+    setV2InitPromptMsg('✅ 已删除', 'ok');
+  } catch (e) {
+    setV2InitPromptMsg('❌ ' + (e.message || e), 'err');
+  }
+});
+v2InitPromptTextEl.addEventListener('input', updateV2InitPromptCount);
+document.getElementById('v2InitPromptList').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-init-prompt-key]');
+  if (!btn) return;
+  document.getElementById('v2InitPromptKey').value = btn.dataset.initPromptKey || '';
+  loadV2InitialPrompt();
+});
+
 async function loadV2SessionOptions() {
   const sel = document.getElementById('v2SessionSelect');
   const prev = sel.value;
@@ -3721,6 +3835,7 @@ document.getElementById('v2SessionSelect').addEventListener('change', (ev) => {
   document.getElementById('v2StateKey').value = key;
   document.getElementById('v2MemoryKey').value = key;
   document.getElementById('v2WakeKey').value = key;
+  document.getElementById('v2InitPromptKey').value = key;
 });
 
 document.getElementById('v2ConfigSave').addEventListener('click', saveV2Config);

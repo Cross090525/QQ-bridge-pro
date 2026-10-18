@@ -489,17 +489,22 @@ SnowLuma 同一账号的 **HTTP token（3000）与 WS token（3001）不同**，
 | --- | --- |
 | `v0.2.0` | r1 —— DSH 0.2.0-rc.2 适配 |
 | ~~`v0.2.1`~~ | r2 —— 采用本方案**之前**的一次性发布：标签与 Release **已撤回**（提交 `9bb7b98` 仍在历史里）。本节全部内容都包含在 r3 中，撤回无功能影响。撤回理由：它不符合「主版本与 DSH 同步」的方案，且发布仅约 26 分钟、无二进制资产、无下游依赖，改写代价为零；留着则每次看标签列表都要额外解释一次 |
-| `v0.2.0-r3` | r3 —— 本版（上游健康 + 客户端库升级 + clone 可移植性 + 1.14.20 实测） |
+| `v0.2.0-r3` | r3 —— 上游健康 + 客户端库升级 + clone 可移植性 + 1.14.20 实测 |
+| `v0.2.0-r4` | r4 —— **本版**：表情包/动图链路、DSH 同源联网搜索、issue 修复、整体体检（见附录 J） |
 
-`package.json` 是 `"private": true`（不发布到 npm），所以 `0.2.0-r3` 这种 prerelease 写法
+`package.json` 是 `"private": true`（不发布到 npm），所以 `0.2.0-r4` 这种 prerelease 写法
 不产生 npm 语义影响；版本号与标签保持一致，便于 `verify:adaptation` 对账。
 
-### I. 本次**未**修的问题（留给下次，避免把一个缺陷混进已验证的改动里）
+### I. r3 时**未**修、r4 已修的问题
 
 工具流水里 `mcp__snowluma__qq_wait_for_messages` 出现过 `ok:false` 且
 `error: "\"Error: [object Object]\""`（2026-09-28、2026-10-03 各一次）。错误对象被 `String()` 成了
-`[object Object]`，**运维与智能体都看不到任何信息** —— 属于与本轮同一个「失败不可读」的主题，
-但它与 SnowLuma 升级无关，故未并入本版。
+`[object Object]`，**运维与智能体都看不到任何信息**。
+
+r4 已修：MCP 侧统一走 `errorText()`（对象 → `JSON.stringify` 或取 `message`，限长 500），
+两条传输通道（普通 fetch 与长轮询）与两个图片工具都用它；并补了「对象形态的 error 必须可读」的回归。
+同轮还把 `qq_wait_for_messages` 整体改走 `node:http` 长轮询，绕开 undici 的 300 秒 `headersTimeout`
+（见附录 J）。
 
 ---
 
@@ -511,3 +516,65 @@ SnowLuma 同一账号的 **HTTP token（3000）与 WS token（3001）不同**，
 - **已知的上游缺口**（值得反馈给 DSH）：被切断 DACL 继承的路径对沙箱**永久不可写且无任何提示**，
   而 DSH 自带的 ACL 诊断技能修的是另外两类（缺 `WRITE_DAC` 的目录链、AppContainer 包 ACE），
   对这种形状会报 `NOT_THIS_CLASS`。这条在任何"自己管 ACL"的项目里都会踩到。
+
+---
+
+## 附：v0.2.0-r4 主要改动
+
+> 完整版见 [Release v0.2.0-r4](https://github.com/Derpyu520/qq-bridge/releases/tag/v0.2.0-r4)。
+> 本附录只记录「改了什么 / 为什么」的要点，便于在仓库内追溯。
+
+### J.1 图片/表情（含动图）链路
+
+**根因**：QQ 表情 CDN（`gxh.vip.qq.com` / `p.qpic.cn` / `multimedia.nt.qq.com.cn`）的 DNS 应答里
+AAAA 排在 A 前面，而本机没有 IPv6 出口；旧 `safe-fetch` 只取 `addresses[0]` 并钉死连接 ——
+抢到 AAAA 的那次请求白等 20 秒超时，DNS 顺序又是轮转的，于是表现为「**部分**表情/图片时好时坏」。
+
+- `safe-fetch`：全部解析结果校验后按 **IPv4 优先、两族交替**排序；多地址时逐地址尝试
+  （单次 8s、最多 4 个、总预算 20s），仅网络层失败才换地址。
+- 表情包：解析保留 `emoji_id`/`summary`/`sub_type`（含 `mface` 段）；**表情优先走 CDN**
+  （市场表情不在网关缓存，`get_image` 必失败），无 URL 时用 `emoji_id`（或文件名里的 32 位 hex）
+  推出 `gxh.vip.qq.com/.../raw300.gif` 兜底。
+- 落库（`appendSocialV2Message`）不再丢 `kind`/`emojiId`/`summary`/`subType`；`summary` 单行化并限长 60。
+- 单条媒体上限：8MB / 64MP / 5 张（`socialV2.media` 可调）。
+
+实测：29 个收藏表情 29/29 抓取成功（修复前抽样 5/6，失败那次 20003ms）；会话里的 GIF 表情
+`20s 超时 → 421ms`。
+
+### J.2 联网搜索
+
+`src/web-search.js`（新）：与 `@deepseek-ai/dsh-web-search-deepseek` 相同的
+`POST https://api.deepseek.com/anthropic/v1/messages` + `web_search_20250305` 服务端工具，
+凭据顺序 `webSearch.apiKey` → 环境变量（默认 `DEEPSEEK_API_KEY`）→ `$DSH_HOME/.credentials.yaml`；
+Bing **RSS** 仅作兜底；5 分钟查询缓存；空结果显式 `note`。安全：key 只发往校验过的
+**https + 公网**端点、禁止跟随重定向、响应体 2MB、总超时 35s、key 不落日志；
+`web_fetch` 仍走 SSRF 防护传输。
+
+### J.3 reserved2 状态机与长轮询
+
+- `refreshMode` 读 DSH settings 时 **user 层优先**（0.2.0-rc.2 写完 `value` 不热更新，
+  否则控制台切的模式会被 5 秒轮询改回去）。
+- 回合判忙改为「起始时间 + 15 分钟租约」：无起始时间的残留 collector 不再永久 busy；
+  `rebuildInFlightCollector` 补起始时间；learner collector 同型修复；busy 日志带原因。
+- `qq_wait_for_messages` 改走 `node:http` 长轮询（undici 默认 300s headersTimeout 会让
+  5 分钟沉睡前观察必然失败）；错误对象统一 `errorText()` 可读。
+- DSH 控制调用（停任务/归档/列会话）全部 15s 超时；事件流重连指数退避 + 「已结束」日志；
+  SnowLuma `error` 事件也触发 token 自愈。
+- 机器人身份（昵称 + QQ 号）注入唤醒 prompt、收尾提醒与 `qq_get_prompt`。
+
+### J.4 体检修复
+
+`/api/send/*` 失败路径的 `catch` 引用了 `try` 内块级变量（发送失败抛 ReferenceError、额度不回滚）；
+媒体落库丢表情字段；搜索空结果 note 写在缓存之后；对象形态的 error 被 String 成 `[object Object]`。
+
+### J.5 验证
+
+`npm run test:audit` **33/35**（仅 `test-audit-setup` / `test-qq-model-view` 的沙箱 `spawn EPERM`）；
+新增/更新离线回归：`test-media-search`、`test-issue-regressions`、`test-audit-regressions`（R15/R16）、
+`test-audit-security-mcp`（长轮询 + 对象 error）；`privacy-scan` 未发现敏感信息。
+
+### J.6 仍已知未修
+
+- `saveSocialV2State()` 写盘失败只记日志、接口仍回 `ok:true`（需写盘队列，改动面大）；
+- `auditAndSend` 的返回值不反映真实发送结果（主回复路径已由 `lastSendSucceeded()` 兜住）；
+- `toolCallNames` 在 `turn/end` 丢失时不回收（有 15 分钟租约兜底，增长极慢）。

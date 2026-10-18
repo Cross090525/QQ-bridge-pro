@@ -166,7 +166,8 @@ export function createTokenLedger({
           off: Number(record.off) || 0
         },
         estimated: record.estimated === true,
-        dropped: Number(record.dropped) || 0
+        dropped: Number(record.dropped) || 0,
+        maxSeq: Number.isFinite(Number(record.maxSeq)) ? Number(record.maxSeq) : -1
       });
       if (t > (sessionSeen.get(sid) ?? 0)) sessionSeen.set(sid, t);
       return true;
@@ -288,7 +289,7 @@ export function createTokenLedger({
       out.push({
         k: 'evict', t: sessionSeen.get(e.sessionId) ?? 0, sid: e.sessionId, key: e.key,
         b: e.buckets, cost: e.cost, peak: e.byTier.peak, off: e.byTier.off,
-        estimated: e.estimated, dropped: e.dropped
+        estimated: e.estimated, dropped: e.dropped, maxSeq: Number(e.maxSeq) >= 0 ? Number(e.maxSeq) : -1
       });
     }
     try {
@@ -331,9 +332,16 @@ export function createTokenLedger({
         cost: 0,
         byTier: { peak: 0, off: 0 },
         estimated: false,
-        dropped: 0
+        dropped: 0,
+        // 被淘汰采样里最大的 seq：一旦更新的投影基线覆盖到它，这些桶就已经包含在
+        // 基线里了，再相加就是重复计费（见 evictionCovered()）。
+        maxSeq: -1
       };
       acc.buckets = addBuckets(acc.buckets, sample.buckets);
+      const sampleSeq = Number(sample.seq);
+      if (Number.isFinite(sampleSeq) && sampleSeq >= 0) {
+        acc.maxSeq = Math.max(Number(acc.maxSeq) >= 0 ? Number(acc.maxSeq) : -1, sampleSeq);
+      }
       const p = priceUsage(sample.buckets, { model: sample.model, at: sample.t || now(), table: priceTable });
       acc.cost += p.cost.total;
       acc.byTier[p.rates.tier] += p.cost.total;
@@ -344,6 +352,22 @@ export function createTokenLedger({
       evictedDirty = true;
     }
     return overflow;
+  }
+
+  /**
+   * 被淘汰的累计桶是否已经被更**新的投影基线**整块覆盖。
+   *
+   * 为什么必须判断：基线（session/follow 快照的 tokenUsage）本身就是"整条会话日志"的
+   * 权威累计，包含 seq <= asOfSeq 的全部事件；而淘汰桶没有 seq，旧代码无条件把它和基线
+   * 相加 —— 一旦重连后拿到的基线覆盖了被淘汰的采样，这部分 token 与花费就被算了两遍
+   * （实测 +33%，且只有 reset() 能清掉）。
+   */
+  function evictionCovered(entry) {
+    if (!entry) return false;
+    const base = baselines.get(entry.sessionId);
+    const maxSeq = Number(entry.maxSeq);
+    if (!base || !Number.isFinite(maxSeq) || maxSeq < 0) return false;
+    return Number(base.seq) >= maxSeq;
   }
 
   function maybeCompact() {
@@ -564,7 +588,8 @@ export function createTokenLedger({
     for (const sid of sessionIds) {
       const base = baselines.get(sid);
       const entry = index.get(sid) ?? null;
-      const gone = evicted.get(sid) ?? null;
+      const rawGone = evicted.get(sid) ?? null;
+      const gone = evictionCovered(rawGone) ? null : rawGone;
       const liveBuckets = entry?.liveBuckets ?? { ...ZERO_BUCKETS };
       const cumulative = addBuckets(base?.buckets ?? ZERO_BUCKETS, gone?.buckets ?? ZERO_BUCKETS);
       const total = addBuckets(cumulative, liveBuckets);
@@ -766,6 +791,7 @@ export function createTokenLedger({
     let ledgerCost = 0;
     let ledgerBuckets = { ...ZERO_BUCKETS };
     for (const e of evicted.values()) {
+      if (evictionCovered(e)) continue; // 已被投影基线覆盖：再加一次就是重复计费
       ledgerCost += Number(e.cost) || 0;
       ledgerBuckets = addBuckets(ledgerBuckets, e.buckets);
     }
