@@ -267,5 +267,10 @@
     "maxTokens": 4096,
     "maxResults": 8,
     "timeoutMs": 35000
+  },
+  "dualMode": {
+    "enabled": false,
+    "ownerPreset": "standard",
+    "ownerPrompt": "你是我的私人任务助手，使用中文，优先完成明确的任务。"
   }
 }

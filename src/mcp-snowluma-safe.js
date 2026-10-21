@@ -288,8 +288,9 @@ async function authorizeRead(key) {
 // 桥接的 /api/status 在「带 agent 令牌」时返回的是最小状态对象（不含 mode 字段），
 // 用 `status?.mode === 'reserved2'` 判断会得到 undefined ⇒ 黑名单判定为假 ⇒ 旧工具被放行，
 // 等于在二代仿真模式下把白名单群名、群成员名单注入模型上下文。
-async function legacyReadToolAllowed() {
-  const status = await agentApi('/api/status');
+async function legacyReadToolAllowed(token) {
+  if (getConfig().dualMode?.enabled === true && !token) return false;
+  const status = await agentApi('/api/status', { headers: token ? { 'x-agent-token': token } : {} });
   return String(status?.mode ?? '') === 'closed-agent';
 }
 
@@ -377,12 +378,12 @@ server.tool(
 server.tool(
   'qq_list_groups',
   '列出机器人所在的全部 QQ 群（只读）：群号、群名。',
-  {},
-  async () => {
+  { token: z.string().optional().describe('双模式下必须携带管理员私聊的会话令牌') },
+  async ({ token }) => {
     // 旧只读工具没有 agent token：只允许在封闭 agent（管理员私聊）里使用。
     // 判定失败一律拒绝（fail-closed），不依赖「看到某个模式才拒绝」的黑名单写法。
     try {
-      if (!(await legacyReadToolAllowed())) {
+      if (!(await legacyReadToolAllowed(token))) {
         return { content: [{ type: 'text', text: '旧只读工具仅在封闭 agent（管理员私聊）模式可用；其它模式请使用带会话令牌的 v2 读工具' }], isError: true };
       }
     } catch (error) {
@@ -404,11 +405,11 @@ server.tool(
 server.tool(
   'qq_get_group_members',
   '列出指定群的成员列表（只读）：QQ 号、昵称、群名片。',
-  { groupId: z.union([z.number(), z.string()]).describe('群号') },
-  async ({ groupId }) => {
+  { groupId: z.union([z.number(), z.string()]).describe('群号'), token: z.string().optional().describe('双模式管理员会话令牌') },
+  async ({ groupId, token }) => {
     const g = String(groupId);
     try {
-      if (!(await legacyReadToolAllowed())) {
+      if (!(await legacyReadToolAllowed(token))) {
         return { content: [{ type: 'text', text: '旧只读工具仅在封闭 agent（管理员私聊）模式可用；其它模式请使用带会话令牌的 v2 读工具' }], isError: true };
       }
     } catch (error) {
@@ -431,11 +432,11 @@ server.tool(
 server.tool(
   'qq_get_group_history',
   '获取指定群的最近消息历史（只读）。messageSeq 可选：从该消息序号往前取。注意：是否可用取决于 SnowLuma 是否实现 get_group_msg_history。',
-  { groupId: z.union([z.number(), z.string()]).describe('群号'), messageSeq: z.number().optional().describe('起始消息序号（可选）') },
-  async ({ groupId, messageSeq }) => {
+  { groupId: z.union([z.number(), z.string()]).describe('群号'), messageSeq: z.number().optional().describe('起始消息序号（可选）'), token: z.string().optional().describe('双模式管理员会话令牌') },
+  async ({ groupId, messageSeq, token }) => {
     const g = String(groupId);
     try {
-      if (!(await legacyReadToolAllowed())) {
+      if (!(await legacyReadToolAllowed(token))) {
         return { content: [{ type: 'text', text: '旧只读工具仅在封闭 agent（管理员私聊）模式可用；其它模式请使用带会话令牌的 v2 读工具' }], isError: true };
       }
     } catch (error) {

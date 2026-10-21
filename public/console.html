@@ -2726,6 +2726,11 @@ function renderSnowlumaHealth(sl) {
 async function refresh() {
   try {
     const s = await api('/api/status');
+    const dual = s.dualMode?.enabled === true;
+    document.querySelectorAll('#modeRow button').forEach(b => {
+      b.disabled = dual;
+      b.title = dual ? '双模式：群聊仿真 / 管理员私聊任务；在 config.json 配置' : '';
+    });
     document.querySelectorAll('#modeRow button').forEach(b => (b.classList.toggle('active', b.dataset.mode === s.mode), b.setAttribute('aria-pressed', String(b.dataset.mode === s.mode))));
     document.getElementById('roleText').textContent = s.role || '无';
     document.getElementById('roleModeText').textContent = s.roleMode === 'silent' ? '静默' : '正常';
@@ -2733,7 +2738,11 @@ async function refresh() {
     updateOverview(s, modeLabel);
     document.getElementById('activity').textContent = s.activity || '（空）';
     const presetSel = document.getElementById('closedPreset');
-    if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
+    if (presetSel) {
+      presetSel.disabled = dual;
+      if (document.activeElement !== presetSel) presetSel.value = dual ? s.dualMode.ownerPreset : (s.closedAgentPreset || '');
+    }
+    if (dual) document.getElementById('statusText').textContent = '双模式 · 群聊仿真 / 管理员私聊任务 · DSH ' + (s.dshReady ? '就绪' : '离线');
   } catch (e) { document.getElementById('statusText').textContent = '连接中断 · 请检查桥接服务'; setConnectionError(e); }
 }
 

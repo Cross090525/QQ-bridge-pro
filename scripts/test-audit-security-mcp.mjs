@@ -121,6 +121,22 @@ function loadSnowlumaTools(fetchImpl, fixtureConfig = null, httpImpl = null) {
   };
 }
 
+test('mixed-mode legacy reads require an owner-bound token and forward it for verification', async () => {
+  const calls = [];
+  const tool = loadSnowlumaTools(async (url, init) => {
+    calls.push({ url: String(url), headers: init.headers });
+    if (String(url).includes('/api/status')) {
+      assert.equal(init.headers['x-agent-token'], 'owner-token');
+      return Response.json({ mode: 'closed-agent' });
+    }
+    return Response.json({ status: 'ok', retcode: 0, data: [] });
+  }, { dualMode: { enabled: true }, consoleToken: 'fixture-token' });
+  assert.equal((await tool('qq_list_groups')).isError, true);
+  assert.equal(calls.length, 0);
+  assert.notEqual((await tool('qq_list_groups', { token: 'owner-token' })).isError, true);
+  assert.equal(calls.length, 2);
+});
+
 // 回归（issue #24）：`qq_wait_for_messages` 以前走全局 fetch（undici 自带 300s headersTimeout），
 // 而沉睡前观察的预算就是 300s —— 第 301 秒必然 `fetch failed`，桥接侧却还在跑满预算占着
 // activeWaits，AI 只能重试烧 token。现在必须走 node:http 长轮询（没有默认响应超时）。
