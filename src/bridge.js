@@ -5541,6 +5541,8 @@ async function main() {
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/wake') {
           const body = await readBody();
+          if (body.bypassRateLimit !== undefined && typeof body.bypassRateLimit !== 'boolean') { sendJson({ ok: false, error: 'bypassRateLimit 必须为布尔值' }, 400); return; }
+          const bypassRateLimit = body.bypassRateLimit === true;
           const key = String(body.key ?? '').trim();
           const reason = String(body.reason ?? 'admin').trim() || 'admin';
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
@@ -5558,6 +5560,10 @@ async function main() {
             clearTimeout(st.pendingWakeTimer);
             st.pendingWakeTimer = null;
           }
+          if (bypassRateLimit && isConversationBusyV2(key)) { sendJson({ ok: false, error: '会话正在执行任务，不能强制并发唤醒' }, 409); return; }
+          if (bypassRateLimit && st.rateLimitRetryTimer) {
+            clearTimeout(st.rateLimitRetryTimer); st.rateLimitRetryTimer = null;
+          }
           // 第一次唤醒必须走 bootstrap：那条 prompt 里带着「二代协议说明 + 操作者为这个会话
           // 预写的初始提示词（群环境/氛围）」。若用手动唤醒的 admin 文案顶掉它，这个会话就
           // 永远拿不到引导 —— 而 bootstrapSent 一旦置真，后续再也不会补发。
@@ -5569,9 +5575,9 @@ async function main() {
           // 等一个可能卡几十秒的模型回合），但必须挂 catch。裸调用一旦 reject 就是
           // unhandledRejection：Node 会打警告甚至按配置退出进程，而 HTTP 那边已经回了 {ok:true}，
           // 表面上"唤醒成功"，实际上谁也不知道它失败了。
-          void sendWakePromptV2(key, effectiveReason).catch((error) => log(`[reserved2] 手动唤醒异常 ${key}:`, error?.message ?? error));
+          void sendWakePromptV2(key, effectiveReason, { bypassRateLimit }).catch((error) => log(`[reserved2] 手动唤醒异常 ${key}:`, error?.message ?? error));
           log(`控制台：手动唤醒 ${key}（${effectiveReason}${firstWake && reason !== effectiveReason ? `，首次唤醒，请求原因 ${reason} 已升级为 bootstrap` : ''}）`);
-          sendJson({ ok: true, key, reason: effectiveReason, requestedReason: reason, firstWake });
+          sendJson({ ok: true, key, reason: effectiveReason, requestedReason: reason, firstWake, bypassRateLimit });
           return;
         }
         // 操作者预写的「会话初始提示词」：控制台专用（AI 既读不到也改不了 —— adminOnlyV2Paths）。
@@ -10437,7 +10443,7 @@ async function main() {
     return `${roleLine}${identityLine}${tokenLine}【提醒】你还没有完成回合收尾。请调用 qq_set_wake_config 设置下一次唤醒条件（例如继续潜水多久、@/名字/关键词/提问/概率/指定成员等），或者调用 qq_mark_read 表示你看过且决定不接。这是为了防止你忘记收尾后进入“永眠”。注意：设置潜水前先用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成沉睡前观察；等待期间有人说话时查看 newMessages，判断不需要你参与即可收尾。`;
   }
 
-  async function sendWakePromptV2(key, reason) {
+  async function sendWakePromptV2(key, reason, { bypassRateLimit = false } = {}) {
     if (cfg.socialV2?.enabled === false) return;
     if (modeFor(key) !== 'reserved2' || socialV2.paused) return;
     if (!isSessionAllowedInCurrentMode(key)) {
@@ -10469,7 +10475,7 @@ async function main() {
     const maxPerHour = Number(cfg.socialV2?.wake?.maxWakePerHour) || 0;
     const recentMinute = (st.wakeTimes || []).filter((t) => now - t < 60000).length;
     const recentHour = (st.wakeTimes || []).filter((t) => now - t < 3600000).length;
-    if ((maxPerMinute > 0 && recentMinute >= maxPerMinute) || (maxPerHour > 0 && recentHour >= maxPerHour)) {
+    if (!bypassRateLimit && ((maxPerMinute > 0 && recentMinute >= maxPerMinute) || (maxPerHour > 0 && recentHour >= maxPerHour))) {
       let retryAfterMs = 0;
       if (maxPerMinute > 0 && recentMinute >= maxPerMinute) {
         const times = (st.wakeTimes || []).filter((t) => now - t < 60000).sort((a, b) => a - b);

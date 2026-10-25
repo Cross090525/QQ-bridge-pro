@@ -212,6 +212,26 @@ test('external MCP must pass the service permission broker; direct guard bypass 
   }
 });
 
+test('only an authenticated administrator can explicitly bypass wake limits for one request', () => fixture(async ({ h, st, request }) => {
+  h.cfg.socialV2.wake.maxWakePerMinute = 1; h.cfg.socialV2.wake.maxWakePerHour = 12;
+  st.wakeTimes = Array.from({ length: 12 }, (_, i) => Date.now() - 120000 - i * 1000);
+  const before = h.calls.prompts.length;
+  const body = { key: GROUP, reason: 'admin', bypassRateLimit: true };
+  assert.equal((await request('/api/socialV2/wake', { body })).status, 401);
+  assert.equal((await request('/api/socialV2/wake', { body, headers: { 'x-console-token': 'fixture-console-token' } })).status, 403);
+  const admin = { token: null, headers: { 'x-console-token': 'fixture-console-token' } };
+  assert.equal((await request('/api/socialV2/wake', { ...admin, body: { ...body, bypassRateLimit: 'true' } })).status, 400);
+  await request('/api/socialV2/wake', { ...admin, body: { key: GROUP, reason: 'admin' } });
+  assert.equal(h.calls.prompts.length, before); assert.ok(st.rateLimitRetryTimer);
+  const forced = await request('/api/socialV2/wake', { ...admin, body });
+  assert.equal(forced.status, 200); assert.equal(forced.data.bypassRateLimit, true);
+  for (let n = 0; n < 50 && h.calls.prompts.length === before; n++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(h.calls.prompts.length, before + 1); assert.equal(st.rateLimitRetryTimer, null);
+  assert.equal((await request('/api/socialV2/wake', { ...admin, body })).status, 409);
+  assert.equal(h.calls.prompts.length, before + 1);
+  assert.equal(h.cfg.socialV2.wake.maxWakePerHour, 12);
+}));
+
 test('SDK rejects remote/credentialed origins and never sends console credentials or follows redirects', async () => {
   for (const baseUrl of ['https://example.com', 'http://127.0.0.1:3100@evil.invalid', 'http://localhost:3100/?token=secret']) {
     assert.throws(() => new QQBridgeClient({ baseUrl, key: GROUP, token: 'fixture' }));
