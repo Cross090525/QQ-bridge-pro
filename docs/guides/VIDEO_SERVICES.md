@@ -11,6 +11,8 @@
 
 Agent 决定是否调用：B站先读文字，按需看图；音轨独立转写；动图不能只看首帧。返回标准 MCP text/image 内容块，原框架将图片绑定为会话媒体 ID，并送给支持图片输入的模型。没有额外调用云端视觉模型。
 
+QQ 分享卡片中的 `b23.tv` 短链同样使用消息内的 sourceId。群唤醒发现待处理B站分享时提醒 Agent 发现内容服务；普通 `web_fetch` 对B站视频页返回服务调用指引，不把网页 HTML 当作视频，也不代替授权服务。提取器按上游 `metadata` 字段读取标题、作者和时长；默认抽帧分布在时间轴内部，避免容器片尾时长存在但解码不到画面的空帧。普通网页抓取支持有界 gzip/deflate/br 解压，解压后的文字仍受长度和时间限制。
+
 ## 本机安装
 
 - 上游 [CZX2244/dsh-bilibili](https://github.com/CZX2244/dsh-bilibili) v0.8.0，修订 `c53af9dee30cf04ee759ac6857d5803196fb2a95`，目录 `C:/DSH/external-media/dsh-bilibili`。只复用 MIT 许可的独立提取模块，不挂载其宿主注入或登录工具。

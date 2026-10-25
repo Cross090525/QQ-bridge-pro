@@ -71,6 +71,17 @@ test('empty searches are rejected without calling the transport', async () => {
   assert.equal(result.isError, true);
 });
 
+test('Bilibili video fetch guides the Agent to scoped content services without downloading HTML', async () => {
+  const callTool = loadWebTools({ safeFetch: async () => { assert.fail('Video HTML must not be fetched'); }, webSearch: async () => {} });
+  for (const url of ['https://b23.tv/example', 'https://www.bilibili.com/video/BV1xx411c7mD']) {
+    const result = await callTool('web_fetch', { url });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /qq_content_services/);
+    assert.match(result.content[0].text, /bilibili.transcript/);
+    assert.match(result.content[0].text, /sourceId/);
+  }
+});
+
 /**
  * 用假 transport 加载 mcp-snowluma-safe.js，拿到它的工具回调。
  * 只需要把 fetch（桥接 API / OneBot HTTP）、http（长轮询）、McpServer、zod、两个本地纯模块塞进上下文。

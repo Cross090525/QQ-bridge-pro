@@ -58,6 +58,8 @@ test('incoming text, cards and media produce typed references without running pr
   assert.equal(h.contentServices.connections.size, 0);
   const unread = await client.unread();
   assert.ok(unread.messages[0].content.some(item => item.platform === 'bilibili' && item.sourceId));
+  assert.match(h.buildWakePromptV2(KEY, 'atMention'), /待处理B站分享/);
+  assert.match(h.buildWakePromptV2(KEY, 'atMention'), /bilibili.transcript/);
   assert.ok(!JSON.stringify(unread.messages[0].content).includes('fixture.amr'));
   assert.equal(h.contentServices.connections.size, 0);
 }));
