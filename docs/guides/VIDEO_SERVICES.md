@@ -45,7 +45,8 @@ sourceId 必须来自当前会话；输入不能指定任意路径、URL、FFmpe
 
 - B站只允许 HTTPS 白名单主机，逐次检查所有 DNS 地址并固定连接公网 IP，每跳重定向复核。SESSDATA 仅发送给 api.bilibili.com，不发送给 CDN。主流 PCDN 不在允许域名时选择官方备用 CDN，不允许任意域名。
 - 部分字幕需要登录。可由管理员在 stdio `transport.envFrom` 配置 `{"BILIBILI_SESSDATA":"BILIBILI_SESSDATA"}` 并设置桥接进程环境变量。默认匿名，不读取浏览器 Cookie。默认 asr=true 可尝试B站必剪转写，仍无文字时下载不超过16 MiB的官方音轨，用本机 SenseVoice 转写前120秒并声明覆盖范围；均失败时只返回元信息，不编造内容。asr=false 禁用这两种音轨转写。
-- B站抽帧限第一P、30分钟、32 MiB单段低清视频；下载检查后才交给 FFmpeg 本机文件。超限/分段源明确失败，不回退到解码器直接访问网络。
+- B站抽帧限第一P、30分钟。32 MiB内的单段低清混合视频直接处理；超过该体积或混合源分段时，改选最低码率 H.264 DASH 纯视频轨，纯视频下载上限96 MiB，不下载无关音轨。预计超限或响应 Content-Length 超限时提前拒绝，未知大小仍按实际接收字节强制限制；下载检查后才交给 FFmpeg 本机文件，不回退到解码器直接访问网络。候选 CDN 仅允许 HTTPS 标准端口，跳过8082/4483等 PCDN 地址。
+- 处理错误使用固定的 `qq-bridge.media-error/v1` 错误码，框架区分 `MEDIA_DOWNLOAD_LIMIT`、`MEDIA_DURATION_LIMIT`、`MEDIA_NO_VIDEO_TRACK`、`MEDIA_FRAME_DECODE` 和一般处理失败。只显示固定文案与有界大小信息，不透传任意上游异常、签名URL或凭据；单个视频超限不能推断整个抽帧服务不可用。
 - QQ 原始媒体沿用框架 8 MiB 上限、缓存根目录与会话检查。单次1–6帧，最大640像素边长，最多30分钟。按实际帧率避开不存在的尾帧，靠近片尾的时间点使用最后可用编码帧；抽样时间可能有一帧偏差。
 - 固定 FFmpeg 构建主要支持 H.264、VP9、ProRes、GIF、WebP和常用音频；HEVC/AV1等需另配支持的完整 FFmpeg。QQ语音有安全缓存标识时，桥接调用 `get_record(out_format=wav)`，优先读取网关返回的 `base64`，即使原消息带 SILK 下载 URL 也先转码。返回字节须为有效 base64、WAV 且不超过8 MiB；检查权限后才调用网关。SnowLuma v1.14.20 的该返回方式可直接跨 Docker 传输，无需共享QQ账号目录或重建容器。仅返回容器文件路径的旧网关仍需共享缓存或升级；不接受任意路径作为转码参数。
 - 本机转写默认120秒、单次最多180秒，可分段请求；结果说明覆盖范围，语音识别可能出错。有声音文字不等于看过画面。
