@@ -1434,6 +1434,21 @@ async function main() {
   const extensionPermissions = new ExtensionPermissions({ policy: cfg.framework?.permissions ?? {}, audit: extensionAudit, onAudit: entries => {
     if (!extensionAuditWritable) throw new Error('audit read-only');
     atomicWriteJson(extensionAuditFile, entries);
+  }, onPending: async approval => {
+    if (!cfg.ownerQQ) { log('扩展审批待处理，但未配置管理员 QQ'); return; }
+    const ownerKey = `private:${cfg.ownerQQ}`;
+    if (!isSessionAllowedInCurrentMode(ownerKey)) { log('扩展审批通知失败：管理员私聊未授权'); return; }
+    const input = redactSensitiveText(JSON.stringify(redactSensitive(approval.input))).slice(0, 500);
+    const message = `🔐 扩展操作请求审批\n来源：${approval.key}\n能力：${approval.capability}\n操作类型：${approval.effect}`
+      + `\n消息：${approval.source?.messageId || '无'}\n参数（摘要）：${input}\n请求：${approval.requestId}`
+      + `\n有效期：申请后5分钟。尚未执行。\n批准这一次：/approve ${approval.requestId}\n拒绝：/deny ${approval.requestId}`
+      + '\n批准后，请在原会话让她携带审批编号继续；批准本身不执行工具。';
+    try {
+      const pendingApproval = extensionPermissions.listRequests().find(item => item.requestId === approval.requestId);
+      if (pendingApproval?.status !== 'pending') return;
+      await sendToQQ(ownerKey, message);
+      log(lastSendFailed.get(ownerKey) ? '扩展审批管理员 QQ 通知发送失败' : '扩展审批已通知管理员 QQ');
+    } catch { log('扩展审批管理员 QQ 通知失败；可在控制台查看'); }
   } });
   const contentServices = new ContentServiceRuntime({ services: cfg.framework?.services ?? [], permissions: extensionPermissions,
     mediaStore: frameworkMedia, readSource: readFrameworkSource });
@@ -10924,6 +10939,22 @@ async function main() {
     if (!plainContent && !quoteTargetIsSelf) return;
     const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
     const roleState = readRoleState();
+
+    // Explicit request IDs prevent ambiguous approvals. These commands never enter the model.
+    const extensionDecision = /^\/(approve|deny)\s+([a-f0-9]{32})\s*$/i.exec(plainContent);
+    if (extensionDecision) {
+      if (!isOwner || key !== `private:${cfg.ownerQQ}`) {
+        await sendToQQ(key, '扩展审批仅管理员本人在机器人私聊中操作。');
+        return;
+      }
+      try {
+        const approval = extensionPermissions.resolve(extensionDecision[2].toLowerCase(), extensionDecision[1].toLowerCase() === 'approve' ? 'approve' : 'deny');
+        await sendToQQ(key, approval.status === 'approved'
+          ? `✅ 已批准这一次 ${approval.capability}（${approval.key}）。尚未执行，请在原会话让她用原参数和审批编号 ${approval.requestId} 继续。`
+          : `❌ 已拒绝 ${approval.capability}（${approval.key}）。`);
+      } catch (error) { await sendToQQ(key, `审批未生效：${redactSensitiveText(error?.message || '请求已失效')}。`); }
+      return;
+    }
 
     // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
     // 审批只有管理员消息会被消费；群友消息不能因为“审批挂起”而被吞掉，应继续走正常处理。

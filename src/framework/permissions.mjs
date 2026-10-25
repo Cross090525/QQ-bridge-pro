@@ -33,9 +33,10 @@ export function normalizePermissionPolicy(config = {}) {
 // The broker never executes work. Approval produces a single-use permit for an
 // exact request, which the authenticated caller must retry with approvalId.
 export class ExtensionPermissions {
-  constructor({ policy = {}, now = Date.now, onAudit = () => {}, audit = [], ttlMs = 300000 } = {}) {
+  constructor({ policy = {}, now = Date.now, onAudit = () => {}, onPending = () => {}, audit = [], ttlMs = 300000 } = {}) {
     this.now = now; this.onAudit = onAudit; this.ttlMs = ttlMs;
     this.requests = new Map(); this.usage = new Map(); this.audit = audit.slice(-500);
+    this.onPending = onPending;
     this.replacePolicy(policy);
   }
   replacePolicy(policy) {
@@ -135,9 +136,12 @@ export class ExtensionPermissions {
           input: structuredClone(input), dataScopes: [...dataScopes], rule, check, status: 'pending', createdAt: this.now(), expiresAt: this.now() + this.ttlMs };
         this.record({ key, capability, requestHash, requestId, event: 'requested' });
         this.requests.set(requestId, approval);
+        // Notification is best effort and never grants permission or delays the caller.
+        const notification = this.publicRequest(approval, true);
+        Promise.resolve().then(() => this.onPending(notification)).catch(() => {});
       }
       if (approval.status === 'pending') return { pending: { status: 'approval_required', approval: this.publicRequest(approval),
-        note: '尚未执行。请管理员在控制台批准，再携带 approvalId=requestId 和完全相同的参数重试一次；不要轮询或另起服务绕过审批。' } };
+        note: '尚未执行。已安排通知管理员QQ（发送失败时仍可在控制台查看）；管理员可在机器人私聊或控制台批准。再携带 approvalId=requestId 和完全相同的参数重试一次；不要轮询或另起服务绕过审批。' } };
       // Even an identical request needs the explicit approval ID to consume it.
       if (!approvalId) return { pending: { status: 'approval_required', approval: this.publicRequest(approval), note: '已批准，请携带 approvalId=requestId 重试原请求。' } };
     }

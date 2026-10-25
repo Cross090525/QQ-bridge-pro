@@ -51,6 +51,45 @@ test('registered services default to deny; denied discovery/calls/media never st
   assert.ok(h.extensionPermissions.audit.every(entry => !JSON.stringify(entry).includes('https://')));
 }));
 
+test('new extension approval privately notifies only the owner once and supports exact-ID QQ decisions', () => fixture(async ({ h, client, receive }) => {
+  const sourceId = await receive();
+  const pending = await client.processContent(SERVICE.id, { sourceId });
+  await new Promise(setImmediate); await h.getSendChain();
+  assert.ok(h.calls.sent.length > 0);
+  assert.ok(h.calls.sent.every(message => message.kind === 'private' && message.id === 123));
+  const text = h.calls.sent.map(message => message.text).join('\n');
+  assert.ok(text.includes(`/approve ${pending.approval.requestId}`));
+  assert.ok(text.includes(`/deny ${pending.approval.requestId}`));
+  assert.ok(text.includes(KEY)); assert.ok(text.includes(SERVICE.id));
+  assert.equal(h.contentServices.connections.size, 0, 'notification must not start the service');
+  const sent = h.calls.sent.length;
+  await client.processContent(SERVICE.id, { sourceId });
+  await new Promise(setImmediate); await h.getSendChain();
+  assert.equal(h.calls.sent.length, sent, 'repeated requests must not spam the owner');
+  const message = text => ({ user_id: 123, self_id: 999, message_id: 7, message: [{ type: 'text', data: { text } }] });
+  await h.handleIncoming('group', 456, message(`/approve ${pending.approval.requestId}`), h.cfg);
+  assert.equal(h.extensionPermissions.listRequests()[0].status, 'pending', 'owner cannot approve from a group');
+  await h.handleIncoming('private', 123, message(`/approve ${pending.approval.requestId}`), h.cfg);
+  assert.equal(h.extensionPermissions.listRequests()[0].status, 'approved');
+  assert.equal(h.contentServices.connections.size, 0, 'approval is not execution');
+  await client.processContent(SERVICE.id, { sourceId, approvalId: pending.approval.requestId });
+  assert.equal(h.extensionPermissions.listRequests()[0].status, 'consumed');
+}, [grant('ask')], { }));
+
+test('QQ denial cannot be forged by group members and notification failures leave approvals pending', () => fixture(async ({ h, client, receive }) => {
+  h.bot.sendPrivateMessage = async () => { throw Error('offline'); };
+  const sourceId = await receive();
+  const pending = await client.processContent(SERVICE.id, { sourceId });
+  await new Promise(setImmediate); await h.getSendChain();
+  assert.equal(h.extensionPermissions.listRequests()[0].status, 'pending');
+  const message = user_id => ({ user_id, self_id: 999, message_id: 8, message: [{ type: 'text', data: { text: `/deny ${pending.approval.requestId}` } }] });
+  await h.handleIncoming('group', 456, message(456), h.cfg);
+  assert.equal(h.extensionPermissions.listRequests()[0].status, 'pending');
+  await h.handleIncoming('private', 123, message(123), h.cfg);
+  assert.equal(h.extensionPermissions.listRequests()[0].status, 'denied');
+  assert.equal(h.contentServices.connections.size, 0);
+}, [grant('ask')]));
+
 test('ask is reviewed in the admin API, approved once, retried exactly and cannot replay', () => fixture(async ({ h, client, request, receive }) => {
   const sourceId = await receive();
   const pending = await client.processContent(SERVICE.id, { sourceId });
