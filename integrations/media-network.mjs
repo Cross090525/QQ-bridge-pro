@@ -28,10 +28,13 @@ function request(url, address, options, maxBytes) {
       if ([301, 302, 303, 307, 308].includes(status)) {
         resolve({ status, location: res.headers.location }); res.destroy(); return;
       }
+      if (Number(res.headers['content-length']) > maxBytes) {
+        reject(Object.assign(Error('B站响应超过大小限制'), { code: 'MEDIA_DOWNLOAD_LIMIT', limitMiB: maxBytes / 1048576 })); res.destroy(); return;
+      }
       const chunks = []; let bytes = 0;
       res.on('data', chunk => {
         bytes += chunk.length;
-        if (bytes > maxBytes) { res.destroy(Error('B站响应超过大小限制')); return; }
+        if (bytes > maxBytes) { res.destroy(Object.assign(Error('B站响应超过大小限制'), { code: 'MEDIA_DOWNLOAD_LIMIT', limitMiB: maxBytes / 1048576 })); return; }
         chunks.push(chunk);
       });
       res.on('error', reject); res.on('aborted', () => reject(Error('B站响应中断')));

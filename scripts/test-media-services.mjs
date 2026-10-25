@@ -6,7 +6,7 @@ import os from 'node:os';
 import { test } from 'node:test';
 import { PNG } from 'pngjs';
 import { LocalMediaEngine, mediaPaths, runMedia, decodeSource, frameTimes } from '../integrations/media-engine.mjs';
-import { BridgeMediaProvider, bilibiliSourceUrl } from '../integrations/media-provider.mjs';
+import { BridgeMediaProvider, bilibiliSourceUrl, mediaFailure, MAX_BILIBILI_VIDEO_BYTES } from '../integrations/media-provider.mjs';
 import { bilibiliFetch, mediaRequestHeaders } from '../integrations/media-network.mjs';
 import { buildMediaServices } from '../integrations/media-services.mjs';
 import { ContentServiceRuntime } from '../src/framework/services.mjs';
@@ -113,6 +113,44 @@ test('B站 frame mode downloads bounded public media before decoding, never hand
     } });
   await provider.call('bilibili_frames', { source: { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, input: { timestamps: '3' } });
   assert.ok(Buffer.isBuffer(received.bytes)); assert.deepEqual(received.input, { timestamps: '3' });
+});
+
+test('long Bilibili videos choose the smallest H.264 video-only track and skip PCDN ports', async () => {
+  let download = 0; let decoded = 0;
+  const provider = new BridgeMediaProvider({ engine: { frames: async bytes => { assert.equal(bytes.toString(), 'video-only'); decoded++; return { content: [] }; } },
+    fetchImpl: async (url, _options, limits) => {
+      if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 42, duration: 1494 } });
+      if (url.includes('fnval=1&')) return Response.json({ code: 0, data: { durl: [{ url: 'https://cdn.bilivideo.com/muxed', size: 97320214 }] } });
+      if (url.includes('fnval=16&')) return Response.json({ code: 0, data: { dash: { video: [
+        { codecid: 12, bandwidth: 100000, baseUrl: 'https://cdn.bilivideo.com/hevc' },
+        { codecid: 7, bandwidth: 700000, baseUrl: 'https://cdn.bilivideo.com/large' },
+        { codecid: 7, bandwidth: 450231, baseUrl: 'https://mcdn.bilivideo.cn:8082/video', backupUrl: ['https://cdn.bilivideo.com/small'] },
+      ] } } });
+      assert.equal(url, 'https://cdn.bilivideo.com/small'); assert.equal(limits.maxBytes, MAX_BILIBILI_VIDEO_BYTES);
+      download++; return new Response('video-only');
+    }
+  });
+  await provider.frames({ type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, { maxFrames: 3 });
+  assert.equal(download, 1); assert.equal(decoded, 1);
+});
+
+test('oversized Bilibili tracks return a typed limit before downloading and never expose raw error text', async () => {
+  const provider = new BridgeMediaProvider({ fetchImpl: async url => {
+    if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 42, duration: 1494 } });
+    if (url.includes('fnval=1&')) return Response.json({ code: 0, data: { durl: [{ url: 'https://cdn.bilivideo.com/muxed', size: 200000000 }] } });
+    if (url.includes('fnval=16&')) return Response.json({ code: 0, data: { dash: { video: [{ codecid: 7, bandwidth: 1000000 }] } } });
+    assert.fail('Oversized tracks must not be downloaded');
+  } });
+  await assert.rejects(provider.frames({ type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }), error => {
+    assert.equal(error.code, 'MEDIA_DOWNLOAD_LIMIT'); assert.equal(mediaFailure(error).limitMiB, 96); return true;
+  });
+  assert.ok(!JSON.stringify(mediaFailure(Error('private signed URL or credential'))).includes('private'));
+  const permissions = new ExtensionPermissions({ policy: { rules: [{ key: 'group:456', capability: 'video.test', decision: 'allow', dataScopes: ['source-reference'] }] } });
+  const runtime = new ContentServiceRuntime({ permissions, services: [{ id: 'video.test', effect: 'read', accepts: ['link'], transport: { type: 'http', url: 'http://127.0.0.1:9871/test' } }],
+    fetchImpl: async () => Response.json({ isError: true, content: [{ type: 'text', text: JSON.stringify({ protocol: 'qq-bridge.media-error/v1', code: 'MEDIA_DOWNLOAD_LIMIT', limitMiB: 96, message: 'private signed URL' }) }] }) });
+  try { await assert.rejects(runtime.call({ key: 'group:456', scope: 'test', serviceId: 'video.test', source: { type: 'link', sourceId: 'a'.repeat(32), url: 'https://example.com' } }), error => {
+    assert.match(error.message, /MEDIA_DOWNLOAD_LIMIT.*96 MiB/); assert.ok(!error.message.includes('private')); return true;
+  }); } finally { await runtime.close(); }
 });
 
 test('real FFmpeg samples changing MP4 and GIF frames, returns PNGs and cleans private job files', { skip: !installed }, () => fixtures(async ({ engine, directory, video, gif }) => {

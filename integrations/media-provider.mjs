@@ -7,6 +7,13 @@ import { LocalMediaEngine, decodeSource } from './media-engine.mjs';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 export const DEFAULT_BILIBILI_SOURCE = path.resolve(repo, '../external-media/dsh-bilibili');
+export const MAX_BILIBILI_VIDEO_BYTES = 96 * 1024 * 1024;
+const mediaError = (code, message) => Object.assign(new Error(message), { code });
+export function mediaFailure(error) {
+  const allowed = ['MEDIA_DOWNLOAD_LIMIT', 'MEDIA_DURATION_LIMIT', 'MEDIA_NO_VIDEO_TRACK', 'MEDIA_FRAME_DECODE'];
+  const code = allowed.includes(error?.code) ? error.code : error?.message === '抽帧结果不完整' ? 'MEDIA_FRAME_DECODE' : 'MEDIA_PROCESSING_FAILED';
+  return { protocol: 'qq-bridge.media-error/v1', code, ...(code === 'MEDIA_DOWNLOAD_LIMIT' ? { limitMiB: Number.isSafeInteger(error.limitMiB) ? error.limitMiB : MAX_BILIBILI_VIDEO_BYTES / 1048576 } : {}) };
+}
 
 export function bilibiliSourceUrl(source) {
   const url = new URL(source?.url);
@@ -40,7 +47,7 @@ export class BridgeMediaProvider {
   }
   mediaAddress(values) {
     const address = values.find(value => {
-      try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password && bilibiliNetworkHost(url.hostname); } catch { return false; }
+      try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password && !url.port && bilibiliNetworkHost(url.hostname); } catch { return false; }
     });
     if (!address) throw Error('视频没有受支持的官方CDN直链');
     return address;
@@ -98,18 +105,32 @@ export class BridgeMediaProvider {
   async frames(source, input = {}) {
     const bvid = await this.bvid(source);
     const info = await this.json(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`);
-    if (!Number.isSafeInteger(info.cid) || !Number.isFinite(info.duration) || info.duration > 1800) throw Error('视频元数据异常或超过30分钟');
+    if (!Number.isSafeInteger(info.cid) || !Number.isFinite(info.duration) || info.duration > 1800) throw mediaError('MEDIA_DURATION_LIMIT', '视频元数据异常或超过30分钟');
     const play = await this.json(`https://api.bilibili.com/x/player/playurl?bvid=${bvid}&cid=${info.cid}&qn=16&fnval=1&fnver=0&fourk=0`);
     const stream = play.durl?.[0];
-    if (!stream?.url || play.durl.length !== 1 || stream.size > 32 * 1024 * 1024) throw Error('视频需要分段、体积过大或没有可用的低清直链');
-    const address = this.mediaAddress([stream.url, ...(Array.isArray(stream.backup_url) ? stream.backup_url : [])]);
+    let address; let maxBytes = 32 * 1024 * 1024;
+    if (stream?.url && play.durl.length === 1 && stream.size <= maxBytes) {
+      address = this.mediaAddress([stream.url, ...(Array.isArray(stream.backup_url) ? stream.backup_url : [])]);
+    } else {
+      // Long muxed videos include an audio track that frame extraction never
+      // needs. Request the smallest H.264 DASH video-only representation; this
+      // codec also works with the bundled Windows decoder.
+      const dash = await this.json(`https://api.bilibili.com/x/player/playurl?bvid=${bvid}&cid=${info.cid}&qn=16&fnval=16&fnver=0&fourk=0`);
+      const tracks = (dash.dash?.video || []).filter(track => track.codecid === 7 && Number.isFinite(track.bandwidth) && track.bandwidth > 0)
+        .sort((a, b) => a.bandwidth - b.bandwidth);
+      const track = tracks[0];
+      if (!track) throw mediaError('MEDIA_NO_VIDEO_TRACK', '没有可用的H.264纯视频轨');
+      maxBytes = MAX_BILIBILI_VIDEO_BYTES;
+      if (track.bandwidth * info.duration / 8 > maxBytes) throw mediaError('MEDIA_DOWNLOAD_LIMIT', '低清纯视频轨预计超过96 MiB');
+      address = this.mediaAddress([track.baseUrl, track.base_url, ...(Array.isArray(track.backupUrl || track.backup_url) ? track.backupUrl || track.backup_url : [])]);
+    }
     const url = new URL(address);
     // Never give FFmpeg a URL. DNS/IP/redirect checks run before a bounded local
     // download, and the decoder is restricted to file/pipe protocols.
-    const response = await this.fetch(url.href, { headers: { referer: 'https://www.bilibili.com/' } }, { maxBytes: 32 * 1024 * 1024, timeoutMs: 120000 });
+    const response = await this.fetch(url.href, { headers: { referer: 'https://www.bilibili.com/' } }, { maxBytes, timeoutMs: 120000 });
     if (!response.ok) throw Error('B站视频下载失败');
     const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > 32 * 1024 * 1024) throw Error('视频下载超过32 MiB');
+    if (buffer.length > maxBytes) throw Object.assign(mediaError('MEDIA_DOWNLOAD_LIMIT', '视频下载超过体积上限'), { limitMiB: maxBytes / 1048576 });
     return this.engine.frames(buffer, input);
   }
   async call(tool, { source, input = {} } = {}) {
@@ -139,7 +160,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   for (const tool of ['bilibili_transcript', 'bilibili_frames', 'media_frames', 'media_transcript']) {
     server.tool(tool, 'Bounded media evidence via the bridge content-service interface', { source: z.record(z.string(), z.unknown()), input: z.record(z.string(), z.unknown()).optional() }, async args => {
       try { return await provider.call(tool, args); }
-      catch { return { isError: true, content: [{ type: 'text', text: '媒体处理失败：请检查来源、授权、时长/大小限制、登录状态及本机运行时。未取得证据时不能声称看过视频。' }] }; }
+      catch (error) { return { isError: true, content: [{ type: 'text', text: JSON.stringify(mediaFailure(error)) }] }; }
     });
   }
   await server.connect(new StdioServerTransport());

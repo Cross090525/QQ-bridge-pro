@@ -165,7 +165,20 @@ export class ContentServiceRuntime {
     const args = service.arguments ? mapServiceArguments(service.arguments, serviceSource, input) : { source: serviceSource, input };
     const raw = await this.transport.call(service, args, { assertLive });
     assertLive();
-    if (raw?.isError) throw frameworkError('内容服务处理失败', 502);
+    if (raw?.isError) {
+      // Only interpret a fixed error vocabulary. Never reflect arbitrary
+      // provider error strings (which may contain signed URLs or credentials).
+      let detail;
+      try { detail = JSON.parse(raw.content?.find(block => block.type === 'text')?.text); } catch {}
+      const reasons = { MEDIA_DOWNLOAD_LIMIT: '该视频超过下载体积上限', MEDIA_DURATION_LIMIT: '该视频时长超过支持范围',
+        MEDIA_NO_VIDEO_TRACK: '该视频没有受支持的纯视频轨', MEDIA_FRAME_DECODE: '所选时间点未能解码出完整画面',
+        MEDIA_PROCESSING_FAILED: '媒体处理失败，请检查网络、登录状态和解码运行时' };
+      if (detail?.protocol === 'qq-bridge.media-error/v1' && Object.hasOwn(reasons, detail.code)) {
+        const limit = detail.code === 'MEDIA_DOWNLOAD_LIMIT' && Number.isSafeInteger(detail.limitMiB) && detail.limitMiB >= 1 && detail.limitMiB <= 128 ? `（${detail.limitMiB} MiB）` : '';
+        throw frameworkError(`内容服务处理失败 [${detail.code}]：${reasons[detail.code]}${limit}`, 502);
+      }
+      throw frameworkError('内容服务处理失败', 502);
+    }
     const blocks = raw?.content;
     if (!Array.isArray(blocks) || !blocks.length || blocks.length > 12) throw frameworkError('服务需要返回 1~12 个 MCP content 项', 502);
     const content = []; const media = []; let textChars = 0; let mediaBytes = 0;
