@@ -9,11 +9,11 @@
 1. **克隆/获取仓库**：
 
    ```bash
-   git clone https://github.com/Derpyu520/qq-bridge.git
-   cd qq-bridge
+   git clone --branch feature/per-conversation-dual-mode https://github.com/Cross090525/QQ-bridge-pro.git
+   cd QQ-bridge-pro
    ```
 
-   > 默认分支 `main` 即当前版本 **v0.1.5**（适配 DSH 0.1.5-rc.1），clone 下来无需切换分支。
+   > 本框架改动位于 `feature/per-conversation-dual-mode`，已在DSH 0.2.0-rc.2上验证。上游基础来自 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge)；不要把上游历史版本或默认分支当作本分支的安装入口。
 
 2. **安装依赖**：
 
@@ -35,7 +35,7 @@
 
    - `snowluma.wsUrl` / `httpUrl`（例如 `ws://127.0.0.1:3001` / `http://127.0.0.1:3000`，分别对应 OneBot WebSocket 与 HTTP API 端口）
    - `snowluma.accessToken`
-   - `dsh.authToken`（新版 DSH 的 launch token，用于换取 Cookie；默认留空，桥接会自动从 DSH guard 日志发现，DSH 重启后也会自动重新发现）
+   - `dsh.authToken`（通常留空，桥接使用本机DSH持久化签名密钥建立Cookie鉴权，不依赖旧guard日志中的启动token；自定义根目录先设置 `DSH_HOME`）
    - `ownerQQ`
    - `allow.private` / `allow.groups`
 

@@ -36,7 +36,7 @@
 
 默认工具面保持下列边界。非空 `allowedMcpTools` 已拒绝；第三方能力应迁移到受权限代理控制的 `framework.services`，不能直连绕过审批。bridge 的会话 API 不赋予控制台权限，但第三方工具自身的执行权限由其宿主负责。接入约定见 [扩展接口](docs/guides/EXTENSION_API.md)。
 
-内容框架中的服务由管理员在 `framework.services` 注册，默认不可调用；需在 `framework.permissions.rules` 授予准确会话/能力及数据范围。ask、write/execute 需要控制台批准后用相同参数和 approvalId 执行一次，模型不能自行批准。服务本身是受信扩展，按其宿主权限运行，不能指定任意启动命令或修改注册表。新媒体输出使用绑定会话的临时媒体 ID，来源与生命周期见 [内容框架](docs/guides/CONTENT_FRAMEWORK.md)，权限见 [授权与审批](docs/guides/EXTENSION_PERMISSIONS.md)。
+内容框架中的服务由管理员在 `framework.services` 注册，默认不可调用；需在 `framework.permissions.rules` 授予准确会话/能力及数据范围。ask、普通write/execute需要一次性审批，新申请会私聊通知ownerQQ；管理员可在控制台处理，或本人在机器人私聊发送 `/approve 请求编号`、`/deny 请求编号`。群内指令和非管理员消息不能审批，模型不能自行批准。批准本身不执行工具，原会话须用相同来源、参数和approvalId重试一次。服务本身是受信扩展，按其宿主权限运行，不能指定任意启动命令或修改注册表。新媒体输出使用绑定会话的临时媒体 ID，来源与生命周期见 [内容框架](docs/guides/CONTENT_FRAMEWORK.md)，权限见 [授权与审批](docs/guides/EXTENSION_PERMISSIONS.md)。
 
 记忆功能整体由 `memory.providers` 提供，`memory.provider` 指定默认值；旧接口仅为协议适配，不读取内置记忆对象，不自动拼接记忆或外传历史。命名空间由部署密钥+会话+提供者派生，提供者必须据此隔离数据。默认变更逐次审批；管理员明确启用本机提供者的 `approvalMode: automatic` 后，该提供者各记忆操作自动授权，不影响普通内容服务。ingest 仍只能选定当前会话真实消息。旧字段归档失败时拒绝启动，不用空数据覆盖。协议与边界见 [开放记忆](docs/guides/MEMORY_PROVIDERS.md)。
 
@@ -45,7 +45,7 @@
 3. **只读联网搜索**：`qq-chat` / `qq-chat-v2` 预设已关闭 DSH 内置 `tool-web` 的 `search` / `fetch`，联网统一走 `src/mcp-web-search-safe.js` 提供的 `mcp__web-search-safe__web_search/web_fetch`。不暴露本地文件、命令执行、写操作。
    - ✅ `mcp__web-search-safe__web_fetch` 已做 SSRF 加固：仅 http/https、禁止 localhost/私有 IP/链路本地/CGNAT/带凭据 URL、DNS 解析结果全量校验、每跳重定向重新校验、响应体限量读取。
 4. **发送强制白名单**：所有发送类工具（`qq_send_group_message` / `qq_send_private_message` / `qq_send_message` / `qq_send_burst` / `qq_reply` / `qq_send_poke` / `qq_send_sticker` / `qq_send_voice` 等）的目标必须命中 `config.json` 的 `allow.groups` / `allow.private`，否则拒绝执行。
-   - **语音额外收紧**：`qq_send_voice` 只能发**语音库**（`socialV2.voice.dir`，默认 `qq-bridge/audio/`）里的文件，不能发任意本地路径、URL 或 base64（防 prompt injection 拿本机文件当语音外发）；另有独立的时长/体积/频率上限（`socialV2.voice.*`），额度与文本发送分开计数。详见 [docs/guides/VOICE.md](docs/guides/VOICE.md)。
+   - **语音额外收紧**：`qq_send_voice` 只能发**语音库**（`socialV2.voice.dir`，默认 `qq-bridge/audio/`）里的文件，不能发任意本地路径、URL 或 base64（防 prompt injection 拿本机文件当语音外发）；另有独立的时长/体积/频率上限（`socialV2.voice.*`），额度与文本发送分开计数。详见 [内容与媒体输出说明](docs/guides/CONTENT_FRAMEWORK.md)。
 5. **发送禁令（模型层）**：persona 明确规定只有「管理端明确指示」或「【管理员】标记的明确要求」才可使用发送工具；禁止写"我已回复/消息已发送（message_id）"类汇报。
 6. **回复审计（桥接层硬拦截）**：agent 回复文本若包含本机路径（`C:\`、`/home/` 等）或凭据特征（token/password/secret/api key 等）→ **整条拦截不发送**，并告知"被安全策略拦截"。
 7. **人格由桥接注入**：角色设定来自 `state/current-role.json` + `roles/<角色>.md`，桥接注入到消息；群友口头要求改角色无效（桥接直接拦截），agent 也无文件工具自行更改。
