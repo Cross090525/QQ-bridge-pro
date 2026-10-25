@@ -43,6 +43,8 @@ sourceId 必须来自当前会话；输入不能指定任意路径、URL、FFmpe
 
 ## 网络、数据及限制
 
+如果 QQ 消息已入站但 DSH 没有新回合，先检查唤醒限频；它发生在内容服务调用之前。默认自动唤醒每分钟1次、每小时12次，随机唤醒和积压补发也会消耗额度。管理员可向管理端 `POST /api/socialV2/wake` 提交 `{"key":"group:群号","reason":"admin","bypassRateLimit":true}` 单次忽略限频；须使用控制台认证，Agent 无权调用。忙碌会话返回409，暂停、模式和白名单检查不被绕过，自动限额保持不变，不能把HTTP接受请求等同于模型已完成分析。
+
 - B站只允许 HTTPS 白名单主机，逐次检查所有 DNS 地址并固定连接公网 IP，每跳重定向复核。SESSDATA 仅发送给 api.bilibili.com，不发送给 CDN。主流 PCDN 不在允许域名时选择官方备用 CDN，不允许任意域名。
 - 部分字幕需要登录。可由管理员在 stdio `transport.envFrom` 配置 `{"BILIBILI_SESSDATA":"BILIBILI_SESSDATA"}` 并设置桥接进程环境变量。默认匿名，不读取浏览器 Cookie。默认 asr=true 可尝试B站必剪转写，仍无文字时下载不超过16 MiB的官方音轨，用本机 SenseVoice 转写前120秒并声明覆盖范围；均失败时只返回元信息，不编造内容。asr=false 禁用这两种音轨转写。
 - B站抽帧限第一P、30分钟。32 MiB内的单段低清混合视频直接处理；超过该体积或混合源分段时，改选最低码率 H.264 DASH 纯视频轨，纯视频下载上限96 MiB，不下载无关音轨。预计超限或响应 Content-Length 超限时提前拒绝，未知大小仍按实际接收字节强制限制；下载检查后才交给 FFmpeg 本机文件，不回退到解码器直接访问网络。候选 CDN 仅允许 HTTPS 标准端口，跳过8082/4483等 PCDN 地址。
