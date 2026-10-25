@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { test } from 'node:test';
 import { PNG } from 'pngjs';
-import { LocalMediaEngine, mediaPaths, runMedia, decodeSource, frameTimes } from '../integrations/media-engine.mjs';
+import { LocalMediaEngine, mediaPaths, runMedia, decodeSource, frameTimes, fitTranscript } from '../integrations/media-engine.mjs';
 import { BridgeMediaProvider, bilibiliSourceUrl, mediaFailure, MAX_BILIBILI_VIDEO_BYTES } from '../integrations/media-provider.mjs';
 import { bilibiliFetch, mediaRequestHeaders } from '../integrations/media-network.mjs';
 import { buildMediaServices } from '../integrations/media-services.mjs';
@@ -49,6 +49,14 @@ test('media inputs reject arbitrary paths, invalid URLs, malformed bytes and unb
 test('native media subprocesses stop on timeout and oversized output', async () => {
   await assert.rejects(runMedia(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { timeoutMs: 80 }), /超时|取消/);
   await assert.rejects(runMedia(process.execPath, ['-e', "process.stdout.write('x'.repeat(10000))"], { maxOutput: 100, timeoutMs: 2000 }), /超时|取消/);
+});
+
+test('long escaped transcripts fit the framework text limit and retain coverage with truncation flags', () => {
+  const value = fitTranscript({ text: '\\"\n'.repeat(5000), segments: Array.from({ length: 36 }, (_, i) => ({ start: i * 5, end: i * 5 + 5, text: '\\"\n'.repeat(1000) })),
+    startSeconds: 0, endSeconds: 180, nextInput: { startSeconds: 180 } });
+  assert.ok(JSON.stringify(value).length <= 15000); assert.equal(value.textTruncated, true);
+  assert.equal(value.timelineTruncated, true); assert.equal(value.segments.length, 36);
+  assert.equal(value.nextInput.startSeconds, 180);
 });
 
 test('multi-megabyte GIF base64 validates without stack overflow while malformed padding stays rejected', () => {
@@ -223,6 +231,56 @@ test('real local SenseVoice can process a bounded video/audio track with no API 
   assert.equal(value.startSeconds, 0); assert.equal(value.endSeconds, 1); assert.equal(typeof value.text, 'string');
 }));
 
+test('scene sampling detects real cuts, reports absolute timestamps and supports focused follow-up', { skip: !installed }, () => fixtures(async ({ engine, video }) => {
+  const result = await engine.frames(video, { sampling: 'scene', maxFrames: 3, startSeconds: 0, durationSeconds: 3 });
+  const value = JSON.parse(result.content[0].text);
+  assert.equal(value.sampling, 'scene'); assert.ok(value.sceneTimes.length >= 1, 'real color cuts must be detected');
+  assert.ok(value.sceneTimes.every(time => time >= 0 && time < 3));
+  assert.equal(value.nextInput, null); assert.equal(value.coverage.sampledOnly, true);
+  const focused = JSON.parse((await engine.frames(video, { sampling: 'scene', startSeconds: 1, durationSeconds: 1, maxFrames: 2 })).content[0].text);
+  assert.ok(focused.sampledTimes.every(time => time >= 1 && time < 2));
+  assert.equal(focused.nextInput.startSeconds, 2);
+  await assert.rejects(engine.frames(video, { sampling: 'scene', durationSeconds: 181 }), /时间范围/);
+  await assert.rejects(engine.frames(video, { startSeconds: 1, durationSeconds: 1, timestamps: '0' }), /范围/);
+}));
+
+test('segmented transcription keeps successful evidence on failure and resumes at the missing segment', { skip: !installed }, () => fixtures(async ({ engine, wav }) => {
+  engine.probe = async () => ({ duration: 22, hasAudio: true });
+  const calls = [];
+  engine.recognizeSegment = async (_file, _directory, start, end) => {
+    calls.push([start, end]); if (start === 12) throw Error('private decoder details');
+    return { start, end, text: `片段${start}` };
+  };
+  const result = await engine.transcript(wav, { startSeconds: 2, durationSeconds: 15, segmentSeconds: 5 });
+  const value = JSON.parse(result.content[0].text);
+  assert.deepEqual(calls, [[2, 7], [7, 12], [12, 17]]);
+  assert.equal(value.status, 'partial'); assert.equal(value.endSeconds, 12);
+  assert.equal(value.nextInput.startSeconds, 12); assert.equal(value.segments.length, 2);
+  assert.equal(result.cacheable, false); assert.ok(!JSON.stringify(result).includes('private'));
+  await assert.rejects(engine.transcript(wav, { segmentSeconds: 1 }), /segmentSeconds/);
+}));
+
+test('real ASR splits an audio window into timestamped segments and clips the final segment', { skip: !installed }, () => fixtures(async ({ engine, wav }) => {
+  const long = Buffer.concat([wav.subarray(0, 44), Buffer.alloc(16000 * 2 * 12)]);
+  long.writeUInt32LE(long.length - 8, 4); long.writeUInt32LE(long.length - 44, 40);
+  const value = JSON.parse((await engine.transcript(long, { startSeconds: 1, durationSeconds: 15, segmentSeconds: 5 })).content[0].text);
+  assert.deepEqual(value.segments.map(s => [s.start, s.end]), [[1, 6], [6, 11], [11, 12]]);
+  assert.equal(value.endSeconds, 12); assert.equal(value.nextInput, null);
+}));
+
+test('Bilibili subtitles honor focused windows and partial ASR results preserve continuation', async () => {
+  const source = { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' };
+  const provider = new BridgeMediaProvider({ extractAll: async () => ({ success: true, metadata: { duration: 300 },
+    transcript: { source: 'subtitle', text: '全部字幕', segments: [{ start: 0, end: 20, text: '前面' }, { start: 100, end: 110, text: '目标片段' }, { start: 200, end: 220, text: '后面' }] } }) });
+  const value = JSON.parse((await provider.call('bilibili_transcript', { source, input: { startSeconds: 100, durationSeconds: 20 } })).content[0].text);
+  assert.equal(value.transcript.text, '目标片段'); assert.equal(value.nextInput.startSeconds, 120);
+  provider.localTranscript = async () => ({ source: 'sensevoice-local', text: '部分识别', segments: [{ start: 50, end: 60, text: '部分识别' }],
+    status: 'partial', coverage: { startSeconds: 50, endSeconds: 60, totalDuration: 300, partial: true }, nextInput: { startSeconds: 60, durationSeconds: 20 } });
+  const result = await provider.call('bilibili_transcript', { source, input: { startSeconds: 50, durationSeconds: 20 } });
+  assert.equal(JSON.parse(result.content[0].text).audio.status, 'partial');
+  assert.equal(result.cacheable, false); assert.ok(result.evidence.includes('audio'));
+});
+
 test('services remain default-deny, and approval is checked before reading source bytes', async () => {
   let reads = 0;
   const permissions = new ExtensionPermissions();
@@ -259,6 +317,10 @@ test('actual framework API invokes real stdio/FFmpeg/SenseVoice for scoped frame
     assert.equal(result.content.filter(block => block.type === 'image').length, 3);
     assert.equal(result.media.length, 3); assert.deepEqual(result.evidence, ['metadata', 'frames']);
     assert.ok(result.media.every(media => /^[a-f0-9]{32}$/.test(media.mediaId)));
+    const scene = await a.processContent('media.frames', { sourceId: 'a'.repeat(32), input: { sampling: 'scene', startSeconds: 1, durationSeconds: 1, maxFrames: 2 } });
+    const sceneMetadata = JSON.parse(scene.content[0].text);
+    assert.equal(sceneMetadata.sampling, 'scene'); assert.equal(sceneMetadata.coverage.startSeconds, 1);
+    assert.equal(sceneMetadata.nextInput.startSeconds, 2);
     await assert.rejects(b.processContent('media.frames', { sourceId: 'a'.repeat(32) }), /会话|引用/);
     assert.ok(!JSON.stringify(result).includes('private-job'));
     const voice = await a.processContent('media.transcript', { sourceId: 'b'.repeat(32), input: { durationSeconds: 1 } });
