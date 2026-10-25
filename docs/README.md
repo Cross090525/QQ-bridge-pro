@@ -13,6 +13,8 @@
 
 消息类型、媒体句柄、按需 MCP/HTTP 服务分发与统一输出见 [CONTENT_FRAMEWORK.md](guides/CONTENT_FRAMEWORK.md)。
 
+B站文稿、视频/GIF/WebP 抽帧、本机音轨转写与现有接口接入见 [VIDEO_SERVICES.md](guides/VIDEO_SERVICES.md)。
+
 扩展默认拒绝、会话授权、管理员一次性审批与已实现边界见 [EXTENSION_PERMISSIONS.md](guides/EXTENSION_PERMISSIONS.md)。
 
 内置记忆整体替换为开放提供者，HTTP/MCP 协议、数据归档与迁移见 [MEMORY_PROVIDERS.md](guides/MEMORY_PROVIDERS.md)。
