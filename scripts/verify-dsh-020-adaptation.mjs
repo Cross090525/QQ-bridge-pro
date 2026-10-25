@@ -35,7 +35,7 @@ import { discoverDshSessionCookie, NodeApiClient, unwrap } from '../src/dsh-clie
 
 const ROOT = process.cwd();
 const DSH_MODULES = dshModulesDir();
-const DSH_HOME = path.join(os.homedir(), '.dsh');
+const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
 const BASE = process.env.DSH_BASE_URL || 'http://127.0.0.1:3080';
 
 let pass = 0, fail = 0;
@@ -148,7 +148,11 @@ const snowlumaEntry = patchDoc.filter((e) => e?.insert).flatMap((e) => e.insert)
 check('mcp-snowluma 带 toolCallTimeoutMs=725000', snowlumaEntry?.config?.toolCallTimeoutMs === 725000);
 check('mcp 路径指向本仓库', mcpIds.every((id) => {
   const e = patchDoc.filter((x) => x?.insert).flatMap((x) => x.insert).find((y) => y.id === id);
-  return String(e.config.args[0]).includes('qq-bridge');
+  const configured = path.resolve(String(e.config.args[0]));
+  const expected = path.join(ROOT, 'src', path.basename(configured));
+  return process.platform === 'win32'
+    ? configured.toLowerCase() === expected.toLowerCase()
+    : configured === expected;
 }));
 
 const pkg = JSON.parse(fs.readFileSync(path.join(DSH_HOME, 'profiles/web/package.json'), 'utf8'));
