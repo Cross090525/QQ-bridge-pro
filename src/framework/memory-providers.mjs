@@ -88,14 +88,18 @@ export function normalizeMemoryProviders(config = []) {
     seen.add(provider.id);
     if (!Array.isArray(provider.operations) || !provider.operations.length || provider.operations.some(op => !MEMORY_OPERATIONS.includes(op)) || new Set(provider.operations).size !== provider.operations.length) throw frameworkError('记忆提供者 operations 无效');
     const transport = normalizeServiceTransport(provider.transport);
+    const approvalMode = provider.approvalMode ?? 'required';
+    if (!['required', 'automatic'].includes(approvalMode)) throw frameworkError('memory approvalMode 必须为 required 或 automatic');
+    if (approvalMode === 'automatic' && transport.type === 'http' && !['127.0.0.1', 'localhost', '[::1]'].includes(new URL(transport.url).hostname)) throw frameworkError('自动记忆授权仅支持本机提供者');
     if (transport.type === 'stdio' && provider.operations.some(op => typeof (provider.tools?.[op] ?? provider.tool) !== 'string' || !(provider.tools?.[op] ?? provider.tool))) throw frameworkError('记忆 MCP 必须为每个操作配置固定 tool 或 tools 映射');
-    return { ...provider, transport, description: text(provider.description, 240), version: text(provider.version, 64, '1'),
+    return { ...provider, transport, approvalMode, description: text(provider.description, 240), version: text(provider.version, 64, '1'),
       timeoutMs: integer(provider.timeoutMs, 30000, 100, 180000) };
   });
 }
 export function memoryDataScopes(operation) { return [operation === 'ingest' ? 'history-export' : `memory-${operation === 'query' ? 'query' : 'write'}`]; }
 function publicManifest(provider, operation) {
   return { effect: operation === 'query' ? 'read' : 'write', description: `${provider.description || provider.id} · memory ${operation}`,
+    ...(provider.approvalMode === 'automatic' ? { memoryApproval: 'automatic' } : {}),
     destination: provider.transport.type === 'http' ? provider.transport.url : '本机记忆 MCP（系统权限由宿主管理）',
     entrypoint: provider.transport.type === 'http' ? 'HTTP POST' : `${provider.transport.command} ${provider.transport.args.join(' ')} :: ${provider.tools?.[operation] ?? provider.tool}`,
     configHash: permissionDigest({ provider, operation }) };
@@ -146,7 +150,7 @@ export class MemoryProviderRuntime {
   namespace(providerId, key) { return crypto.createHmac('sha256', this.namespaceSalt).update(`${providerId}\0${key}`).digest('hex'); }
   capabilities() { return this.providers.flatMap(provider => provider.operations.map(operation => ({ id: `memory.${provider.id}.${operation}`, effect: operation === 'query' ? 'read' : 'write', description: `${provider.description || provider.id} · ${operation}` }))); }
   list(key) {
-    return this.providers.map(provider => ({ id: provider.id, description: provider.description, version: provider.version,
+    return this.providers.map(provider => ({ id: provider.id, description: provider.description, version: provider.version, approvalMode: provider.approvalMode,
       operations: provider.operations.map(operation => ({ operation, capability: `memory.${provider.id}.${operation}`,
         permission: this.permissions.inspect({ key, capability: `memory.${provider.id}.${operation}`, manifest: publicManifest(provider, operation), dataScopes: memoryDataScopes(operation) }).decision }))
         .filter(item => item.permission !== 'deny') })).filter(provider => provider.operations.length);

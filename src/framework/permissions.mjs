@@ -51,10 +51,16 @@ export class ExtensionPermissions {
   decision(key, capability, manifest) {
     const matches = this.policy.rules.filter(rule => rule.key === key && rule.capability === capability);
     if (matches.some(rule => rule.decision === 'deny')) return { decision: 'deny' };
+    // Only a normalized, locally registered memory provider can set this
+    // manifest flag. Agent input and ordinary content services cannot set it.
+    const automaticMemory = manifest.memoryApproval === 'automatic'
+      && /^memory\.[a-z][a-z0-9-]{0,39}\.(query|write|update|delete|clear|ingest)$/.test(capability);
+    if (automaticMemory && matches.length === 0) return { decision: 'allow', dataScopes: ['memory-query', 'memory-write', 'history-export'],
+      maxCallsPerMinute: 60, maxCallsPerHour: 1000, maxInputChars: 30000 };
     // Ambiguous overlapping grants must not accidentally widen privileges.
     if (matches.length !== 1) return { decision: 'deny' };
     const rule = matches[0];
-    const decision = rule.decision === 'allow' && !['read', 'generate'].includes(manifest.effect) ? 'ask' : rule.decision;
+    const decision = rule.decision === 'allow' && !['read', 'generate'].includes(manifest.effect) && !automaticMemory ? 'ask' : rule.decision;
     return { ...rule, decision };
   }
   inspect(request) {

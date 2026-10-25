@@ -17,6 +17,8 @@
 
 内置记忆整体替换为开放提供者，HTTP/MCP 协议、数据归档与迁移见 [MEMORY_PROVIDERS.md](guides/MEMORY_PROVIDERS.md)。
 
+已选用的本机 Haitang 记忆、全部操作自动授权和分群隔离见 [HAITANG_MEMORY.md](guides/HAITANG_MEMORY.md)。
+
 管理员授权的限时争论辅助、自动发送、受限事件接口及 DSH 插件运行方式见 [DEBATE_PLUGIN.md](guides/DEBATE_PLUGIN.md)。
 
 | 文档 | 一句话说明 | 状态 |

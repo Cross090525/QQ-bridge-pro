@@ -1,5 +1,7 @@
 # 安全基线与威胁模型（qq-bridge → QSH）
 
+本机记忆自动授权增量：`memory.providers[].approvalMode: automatic` 是管理员的提供者级授权，只允许 stdio 或回环 HTTP/HTTPS；仅 `memory.<providerId>.<operation>` 使用该例外，普通 write/execute 服务仍逐次审批。显式 deny/ask、有效会话、命名空间、预算与审计保留。Haitang 的实际存储和 MCP 隔离测试为 test:memory:haitang；默认 required 提供者行为不变。
+
 争论辅助增量：管理员通过独立任务管理 API 授予精确群、对象、议题和期限内的 `auto` 或 `review` 发言权。`x-debate-token` 不是会话令牌，不能访问其他上下文或任意发送；候选事件与草稿均限任务。自动发送不设冷却/次数配额，仍检查任务状态、授权 revision、群白名单、模式、暂停与静默；排队消息在执行前复核。递增 requestSeq 与 requestId/正文/引用绑定，旧草稿淘汰后也不能重放；失败发送不自动重试。新 qq-debate 预设通过 tools 注入、空 allow 列表与执行守卫拒绝所有工具，独立 worker 不把凭据传给模型；只接受正常完成回合的结构化分析。任务重启失效，归档的 DSH 会话仍可能保留资料。详见 [DEBATE_PLUGIN.md](DEBATE_PLUGIN.md)，回归为 test:debate、test:debate:ui、test:debate:dsh。
 
 > 本文把项目里**已经实现的**安全边界、**已知的**残余风险、以及**每次发布必须回归**的

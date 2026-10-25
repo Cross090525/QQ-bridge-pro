@@ -2230,7 +2230,7 @@ button:active:not(:disabled) {
       </div></details>
 <details class="settings-group" id="debatePanel"><summary>争论辅助</summary><div class="settings-content"><p>管理员指定群、对象、议题和有效期，可一次授权任务内自动发言。不设发送冷却或次数上限。</p><button type="button" onclick="location.href='/debate?token='+encodeURIComponent(localStorage.getItem('consoleToken')||'')">打开争论任务管理</button></div></details>
 <details class="settings-group" id="extensionPermissionPanel"><summary>MCP / skills 授权与审批</summary><div class="settings-content">
-      <p class="meta">扩展默认拒绝。规则必须指定准确会话与能力；write / execute 即使配置 allow 也需要逐次审批。注册服务不会自动授权。管理员任务私聊同样需要授权。</p>
+      <p class="meta">普通扩展默认拒绝，write / execute 需逐次审批。本机记忆提供者若由管理员启用 automatic 模式，记忆操作可自动执行；显式 deny / ask 规则仍优先。群与会话隔离始终保留。</p>
       <div class="row">
         <button id="extensionPermissionsLoad" class="small">加载授权与审批</button>
         <button id="extensionPermissionsSave" class="small">保存授权（使旧审批失效）</button>

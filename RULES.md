@@ -38,7 +38,7 @@
 
 内容框架中的服务由管理员在 `framework.services` 注册，默认不可调用；需在 `framework.permissions.rules` 授予准确会话/能力及数据范围。ask、write/execute 需要控制台批准后用相同参数和 approvalId 执行一次，模型不能自行批准。服务本身是受信扩展，按其宿主权限运行，不能指定任意启动命令或修改注册表。新媒体输出使用绑定会话的临时媒体 ID，来源与生命周期见 [内容框架](docs/guides/CONTENT_FRAMEWORK.md)，权限见 [授权与审批](docs/guides/EXTENSION_PERMISSIONS.md)。
 
-记忆功能整体由 `memory.providers` 提供，`memory.provider` 指定默认值；旧接口仅为协议适配，不读取内置记忆对象，不自动拼接记忆或外传历史。命名空间由部署密钥+会话+提供者派生，提供者必须据此隔离数据。query、各变更操作与 ingest 分别授权；变更逐次审批，ingest 仍只能选定当前会话真实消息。旧字段归档失败时拒绝启动，不用空数据覆盖。协议与边界见 [开放记忆](docs/guides/MEMORY_PROVIDERS.md)。
+记忆功能整体由 `memory.providers` 提供，`memory.provider` 指定默认值；旧接口仅为协议适配，不读取内置记忆对象，不自动拼接记忆或外传历史。命名空间由部署密钥+会话+提供者派生，提供者必须据此隔离数据。默认变更逐次审批；管理员明确启用本机提供者的 `approvalMode: automatic` 后，该提供者各记忆操作自动授权，不影响普通内容服务。ingest 仍只能选定当前会话真实消息。旧字段归档失败时拒绝启动，不用空数据覆盖。协议与边界见 [开放记忆](docs/guides/MEMORY_PROVIDERS.md)。
 
 1. **无本地工具**：qq-chat / qq-chat-v2 预设不挂载 bash/pwsh、文件读写、子代理、工作流——群友无论如何诱导，agent 物理上无法操作本机。
 2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 三个命名空间下的工具，以及 `ask_user_question` / `todo_write`；其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。QQ 动作无禁言、踢人、文件上传下载等管理操作。

@@ -69,7 +69,9 @@ node examples/memory-provider.mjs --stdio --data=C:/DSH/memory-example.json
 
 ## 授权
 
-能力名为 `memory.<providerId>.<operation>`，按准确会话单独授予。query 是 read，所有变更包括 ingest 都是 write，必须逐次审批；即使 decision 配成 allow，也不能跳过变更审批。
+能力名为 `memory.<providerId>.<operation>`，按准确会话单独授予。默认 `approvalMode: "required"`：query 是 read，所有变更包括 ingest 都是 write，必须逐次审批；即使 decision 配成 allow，也不能跳过变更审批。
+
+本机提供者可由管理员明确配置 `approvalMode: "automatic"`，一次授权它为有效会话自动执行所有已注册记忆操作（含删除、清空和选定聊天记录 ingest），不产生逐次审批。只支持 stdio 或回环地址 HTTP/HTTPS；不会自动授权其他内容服务。仍按会话命名空间隔离、校验有效会话、暂停/撤权、调用预算和审计。显式 deny 或 ask 规则优先于自动授权；未配置此选项的其他提供者保持默认拒绝/审批机制。已接入的本机 Haitang 提供者按用户选择使用 automatic，见 [HAITANG_MEMORY.md](HAITANG_MEMORY.md)。
 
 | 操作 | 数据范围 | 行为 |
 |---|---|---|
