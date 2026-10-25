@@ -51,6 +51,14 @@ test('native media subprocesses stop on timeout and oversized output', async () 
   await assert.rejects(runMedia(process.execPath, ['-e', "process.stdout.write('x'.repeat(10000))"], { maxOutput: 100, timeoutMs: 2000 }), /超时|取消/);
 });
 
+test('multi-megabyte GIF base64 validates without stack overflow while malformed padding stays rejected', () => {
+  const bytes = Buffer.alloc(7 * 1024 * 1024); bytes.write('GIF89a');
+  assert.ok(decodeSource({ data: bytes.toString('base64') }).equals(bytes));
+  for (const data of ['R0lGODlh=', 'R0lGODlhAB==', 'R0lG=DhhaQ==', 'R0lGODlh\n']) {
+    assert.throws(() => decodeSource({ data }), /base64/);
+  }
+});
+
 test('B站 transport pins checked addresses, strips CDN cookies and rejects foreign redirect hops', async () => {
   assert.equal(mediaRequestHeaders(new URL('https://api.bilibili.com/x'), { Cookie: 'session-fixture' }).cookie, 'session-fixture');
   assert.equal(mediaRequestHeaders(new URL('https://a.bilivideo.com/file'), { Cookie: 'session-fixture', Authorization: 'private' }).cookie, undefined);

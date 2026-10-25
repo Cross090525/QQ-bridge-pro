@@ -50,9 +50,12 @@ export function mediaExtension(buffer) {
 }
 export function decodeSource(source) {
   if (!source || typeof source.data !== 'string' || source.data.length > Math.ceil(MAX_MEDIA_BYTES / 3) * 4 + 4
-      || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(source.data)) throw Error('媒体必须由框架提供有界 base64 字节');
+      || source.data.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(source.data)) throw Error('媒体必须由框架提供有界 base64 字节');
   const buffer = Buffer.from(source.data, 'base64');
   if (!buffer.length || buffer.length > MAX_MEDIA_BYTES) throw Error('媒体为空或超过 8 MiB');
+  // A repeated-group regex over multi-megabyte base64 can exhaust V8's stack.
+  // Canonical re-encoding validates padding/unused bits without recursion.
+  if (buffer.toString('base64') !== source.data) throw Error('媒体必须由框架提供规范 base64 字节');
   mediaExtension(buffer); return buffer;
 }
 export function frameTimes(duration, input = {}, lastFrameTime = Math.max(0, duration - 0.1)) {
