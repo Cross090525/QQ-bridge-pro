@@ -6,6 +6,7 @@ import { bridgeHarness } from './audit-bridge-harness.mjs';
 
 async function fixture(run, cfg = {}) {
   const h = await bridgeHarness({ config: { socialV2: {
+    context: { strategy: 'inline' }, // These cases exercise the optional inline snapshot protocol.
     wake: { preSleepWaitEnabled: true, preSleepWaitMs: 300000 },
     wait: { minMs: 100, maxMs: 600000, minQuietAfterNewMs: 100 },
     proactive: { enabled: false }, sticker: { enabled: false },

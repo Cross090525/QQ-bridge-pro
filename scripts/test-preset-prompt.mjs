@@ -133,18 +133,21 @@ test('删掉安全不变量或正文过短时阻断保存（保护 AI 效果与�
 });
 
 test('写回沿用文件主导行尾，且不吞掉块尾空行', () => {
-  const next = renderPresetPromptYaml(source, originalPrefix);
+  // The repository enforces LF. Construct a CRLF fixture explicitly so this
+  // portability regression does not depend on checkout autocrlf settings.
+  const crlfSource = source.replace(/\r?\n/g, '\r\n');
+  const next = renderPresetPromptYaml(crlfSource, originalPrefix);
   const crlf = (next.match(/\r\n/g) ?? []).length;
   const lfOnly = (next.match(/\n/g) ?? []).length - crlf;
   assert.ok(crlf > 0, 'CRLF 文件写回后应仍使用 CRLF');
   assert.equal(lfOnly, 0, '写回后不应残留/新增 LF-only 行');
   assert.ok(next.includes('prefix: |-\r\n'), '新增行应使用 CRLF');
   // 块之后的内容（空行、注释、后续条目）必须逐字保留
-  const before = locatePresetPromptBlock(source);
+  const before = locatePresetPromptBlock(crlfSource);
   const after = locatePresetPromptBlock(next);
   assert.deepEqual(
     next.split('\n').slice(after.blockEnd),
-    source.split('\n').slice(before.blockEnd),
+    crlfSource.split('\n').slice(before.blockEnd),
     'prefix 块之后的内容应逐字不变（含块尾空行与注释）',
   );
   assert.ok(source.split('\n').slice(before.blockEnd).some((l) => l.trim() === ''), '样本应确实包含块尾空行，否则该断言无意义');

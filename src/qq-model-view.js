@@ -5,7 +5,7 @@ const DEFAULT_FALSE_FIELDS = new Set([
 ]);
 const OPTIONAL_FIELDS = new Set([
   'seq', 'messageId', 'sender', 'userId', 'text', 'plain', 'tail', 'kind',
-  'ownerLabel', 'media', 'forwardIds', 'nestedForwardIds'
+  'ownerLabel', 'media', 'content', 'forwardIds', 'nestedForwardIds'
 ]);
 
 function isRecord(value) {

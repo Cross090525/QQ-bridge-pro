@@ -20,8 +20,17 @@ import * as modelPrices from '../src/model-prices.js';
 import * as tokenLedger from '../src/token-ledger.js';
 import * as voiceLib from '../src/send-voice-lib.js';
 import * as presetPrompt from '../src/preset-prompt.js';
+import * as roleCard from '../src/role-card.js';
 import * as stateAcl from '../src/state-acl.mjs';
 import * as dualMode from '../src/core/dual-mode.mjs';
+import * as contextQuery from '../src/core/context-query.mjs';
+import * as publicApi from '../src/core/public-api.mjs';
+import * as frameworkContent from '../src/framework/content.mjs';
+import { FrameworkMediaStore } from '../src/framework/media-store.mjs';
+import { ContentServiceRuntime } from '../src/framework/services.mjs';
+import * as extensionPermissionsModule from '../src/framework/permissions.mjs';
+import { MemoryProviderRuntime } from '../src/framework/memory-providers.mjs';
+import * as memoryCompat from '../src/framework/memory-compat.mjs';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -125,6 +134,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     buildWakePromptV2, buildWakeSnapshotV2, sendWakePromptV2, socialV2,
     refreshMode, modeAllowed, modeFor, ownerAgentToken, ownerAgentTokens, sessionPolicy, reconcileSessionPolicies, trackTurnEvent, replayPendingWakeReasonsV2,
     collectors, setupSleepTimerV2,
+    contentSources, contentServices, frameworkMedia, frameworkScope, extensionPermissions, memoryProviders,
     getInitialPrompt, setInitialPrompt, loadInitialPrompts, formatInitialPromptV2,
     initialPrompts, initialPromptMaxChars,
     extractMediaFromSegments, segmentsToText, fetchOneBotImage, fetchMediaData, resolveMediaList,
@@ -165,7 +175,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
-    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...dualMode,
+    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...dualMode, ...contextQuery, ...publicApi,
+    ...frameworkContent, FrameworkMediaStore, ContentServiceRuntime, ...extensionPermissionsModule, MemoryProviderRuntime, ...memoryCompat,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),
@@ -197,6 +208,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   bridge.setPresets(['standard', 'qq-chat', 'qq-chat-v2']);
   bridge.setReady(true);
   return { ...bridge, calls, temp, async close() {
+    await bridge.contentServices.close();
+    await bridge.memoryProviders.close();
     for (const timer of timers) clearTimeout(timer);
     fs.rmSync(temp, { recursive: true, force: true });
   } };

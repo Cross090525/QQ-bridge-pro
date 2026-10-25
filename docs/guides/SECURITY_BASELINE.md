@@ -36,6 +36,8 @@
 
 ### 2. 工具面（agent 能做什么）
 
+2026-10-24 扩展接口增量：管理员可以在受限预设的 `qq-tool-restrict.config.allowedMcpTools` 中列出至多 64 个完整第三方 MCP 工具名，执行期精确放行，不支持通配符或本地通用 skill/shell 工具。默认仍只有原内置工具。允许第三方 MCP 代表信任该实现；它自身的进程权限不由 bridge 沙箱化。参考 [EXTENSION_API.md](EXTENSION_API.md)。
+
 | 机制 | 位置 | 行为 |
 | --- | --- | --- |
 | 预设工具守卫 | `plugins/qq-agent-presets/qq-tool-restrict.mjs`（唯一权威实现，`dsh/agent-presets/*/qq-tool-restrict.mjs` 只是 re-export 壳） | 两道闸门：① 注册期 `tools.restrict({deny})` 把本地执行/宿主运行期工具**从模型 schema 里隐藏**（67 个名字，2026-09-29 按 DSH 0.2.0-rc.2 真实工具清单重新对账）；② 执行期 `tools.guard` 精确白名单：仅 `mcp__snowluma__*` / `mcp__snowluma-host__*` / `mcp__web-search-safe__*` + `ask_user_question` / `todo_write`；空/未知名字一律拒绝；内置 `tool-web` 的 search/fetch 关闭。对账工具：`npm run scan:tool-names`（**每次升级 DSH 后应跑一次**：`tools.restrict` 对不存在的名字会抛错并被逐个 try/catch 吞掉 ⇒ 假名 = 静默失效；新版本新增的能力若不补进名单 = 漏隐藏） |
@@ -56,10 +58,18 @@
 
 ### 4. 控制台（本机最高权限入口）
 
+2026-10-24 API v1 增量：有限的 `/api/v1/*` 路由使用当前会话令牌独立鉴权，不需要控制台令牌；其他路由保留控制台令牌要求。v1 先校验令牌、准入与模式，再映射到现有处理函数，继承 Host/Origin、暂停、工具开关、发送审计和限流。key 从令牌推导，显式跨会话目标拒绝；请求体等待期间捕获的身份在异步响应与发送时重新检查。管理员任务允许能力查询、本人内容处理与回复本人，具体内容接口见下段。令牌代表当前会话整组能力，尚无第三方独立 scope 与单独吊销。新增上下文查询只读、有界，不标记已读，不提供其他会话的历史/记忆；黑话库仍全局共享，但不返回学习证据。对应回归为 `npm run test:context`，已加入 `test:audit`。
+
+内容框架增量：v1 增加 content/services、content/process、content/send、media/read、media/upload。资源引用必须来自该会话收到的消息；bytes 读取只允许公网安全下载或显式 mediaRoots 缓存目录，不默认开放整个 SnowLuma 安装目录。媒体上传路由的请求体上限为 12MB，其余仍为 1MB；单媒体最多 8MB、格式校验、图片沿用像素限制。生成媒体保存在 state/framework-media，ID 绑定会话令牌摘要，不加入共享语音库，过期与总容量有上限。旧语音接口仍只读取语音库；新统一发送可读取会话自己的受管媒体 ID。管理员可处理本人收到的内容与发送本人媒体，不得到群记忆。服务调用继承请求身份，在暂停/撤权/超时后拒绝晚到结果；队列发送重新检查身份。注册的 stdio 命令/参数和 HTTP 地址仅来自管理配置；URL reference 交给提供者时，其下载安全由该提供者负责。默认不配置任何识别/合成服务。回归为 test-content-framework.mjs。
+
+扩展权限增量：framework 托管服务与 media read/upload 默认拒绝，精确会话/能力/dataScopes 授权；effect 未声明按 execute，write/execute 至少逐次审批。待审批时不读媒体、不启动 MCP、不连接 HTTP。审批仅本机控制台，携带 Agent 标识即拒绝，v1 不映射管理路由；许可绑定参数/来源记录/配置摘要/策略修订/会话租约，5 分钟有效，原子消费且失败不恢复。缓存与运行中结果重查权限，策略修改立即撤销旧许可。服务输入按受限平面 schema 严格校验。媒体直接读/上传有独立能力，不继承服务权限。权限审计保存在受保护 state/extension-audit.json，最多 500 项/7 天，不写原始参数或凭据，损坏/不可写时拒绝执行。仿真预设不再支持额外直连 allowedMcpTools。上述边界不覆盖管理员 standard 自带工具、旧 QQ 内置工具、runner 内部动作或 OS 权限；完整会话令牌仍仅供受信客户端。具体限制见 EXTENSION_PERMISSIONS.md，回归 npm run test:permissions。
+
+开放记忆增量：旧内置记忆字段、匹配/合并/TTL 规则和 prompt 自动注入已移出核心，旧入口均转提供者，未配置即禁用、故障不回退。v1/memory 提供 query/write/update/delete/clear/ingest，默认拒绝且按操作分配精确能力；memory-query 不推出 memory-write 或 history-export，所有变更必须审批。提供者只接收派生 namespace 与有界业务参数，不得接收 bridge 会话/控制台令牌；必须回显协议/请求/namespace，其他会话标识被拒。ingest 只解析当前会话真实 seq（至多 10 条），批准前不外传且不标记已读，记录变化会撤销原许可。HTTP/MCP 响应最多 128KiB，模型结果按 maxChars 有界且标为外部数据。提供者存储、真实隔离与后台任务权限仍由宿主管理。旧字段重写前先存不可变归档，备份失败或状态无法解析时阻断启动；归档不自动导入。命名空间密钥必须保留。示例只有关键词检索，不宣称向量/摘要服务。回归 npm run test:memory 与审批面板真实浏览器测试，协议见 MEMORY_PROVIDERS.md。
+
 | 机制 | 位置 | 行为 |
 | --- | --- | --- |
 | 只监听回环 | `server.listen(port, '127.0.0.1')` | 永不绑 `0.0.0.0` |
-| 令牌门 | 请求最前面 | **所有**路由（读+写）都要 `x-console-token` 或 `?token=`；未配置时启动自动生成 192 bit 随机值 |
+| 令牌门 | 请求最前面 | 管理与旧路由要 `x-console-token` 或 `?token=`；未配置时启动自动生成 192 bit 随机值。有限 v1 扩展接口单独使用会话令牌，不能访问管理路由 |
 | 定长比较 | `crypto.timingSafeEqual` | 比较前先比长度，避免 `!==` 短路带来的时延侧信道 |
 | Host 校验 | 请求最前面 | Host 必须是 `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>`，否则 403（DNS rebinding 硬化） |
 | CSRF | 非 GET 请求 | 必须 `content-type: application/json`；若带 `Origin`，其 host 必须等于本机 |

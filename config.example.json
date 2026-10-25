@@ -39,6 +39,12 @@
   "questionTimeoutMs": 300000,
   "consolePort": 3100,
   "consoleToken": "",
+  "framework": {
+    "permissions": { "rules": [] },
+    "services": [],
+    "mediaRoots": []
+  },
+  "memory": { "provider": null, "providers": [] },
   "pricing": {
     "models": {
       "my-relay-model": {
@@ -242,6 +248,7 @@
       "notifyOwnerOnError": false
     },
     "context": {
+      "strategy": "on-demand",
       "recentLimit": 100,
       "unreadLimit": 30,
       "contextWindow": 20,

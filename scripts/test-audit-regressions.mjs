@@ -256,34 +256,33 @@ await test('R8 wake-config 丢弃未知 triggers 键（不落盘、不回传模�
 });
 
 // ── R9. memory-update 不得凭空建条目 / 写穿原型链 ────────────────────────────
-await test('R9 memory-update 只编辑已有条目，不写穿 Object.prototype', async () => {
+await test('R9 旧 memory-update 不再修改内置字段；没有提供者时拒绝且不写穿原型', async () => {
   const h = await bridgeHarness();
   try {
     h.setMode('reserved2');
     const st = h.getSocialV2State('group:456');
-    st.memberImpressions['群友A'] = { traits: ['友善'], interactionCount: 1, lastSeenAt: Date.now() };
+    st.memberImpressions = { 群友A: { traits: ['友善'], interactionCount: 1, lastSeenAt: Date.now() } };
     await withServer(h, async (port) => {
       const inherited = await call(port, '/api/socialV2/memory-update', {
         method: 'POST', token: st.agentToken, body: { key: 'group:456', category: 'memberImpression', target: 'toString', newContent: 'hacked' }
       });
-      assert.equal(inherited.status, 404, '继承来的属性名不得被当成已有条目');
+      assert.equal(inherited.status, 503, '没有提供者时不得回退到内置对象');
       assert.equal(Object.prototype.hasOwnProperty.call(st.memberImpressions, 'toString'), false);
       assert.equal(Object.prototype.toString.traits, undefined, '不得往内置函数对象上写属性');
 
       const unknown = await call(port, '/api/socialV2/memory-update', {
         method: 'POST', token: st.agentToken, body: { key: 'group:456', category: 'memberImpression', target: '不存在的群友', newContent: 'x' }
       });
-      assert.equal(unknown.status, 404, '不存在的条目不凭空创建（防止无限塞名字）');
+      assert.equal(unknown.status, 503, '没有提供者不能凭空创建记忆');
 
       const ok = await call(port, '/api/socialV2/memory-update', {
         method: 'POST', token: st.agentToken, body: { key: 'group:456', category: 'memberImpression', target: '群友A', newContent: '幽默，爱接梗' }
       });
-      assert.equal(ok.status, 200, ok.body);
+      assert.equal(ok.status, 503, '旧接口不能继续写内置记忆');
       // 跨 vm realm 的数组原型不同，deepEqual 会误判；逐元素断言。
       const traits = st.memberImpressions['群友A'].traits;
-      assert.equal(traits.length, 2);
-      assert.equal(traits[0], '幽默');
-      assert.equal(traits[1], '爱接梗');
+      assert.equal(traits.length, 1);
+      assert.equal(traits[0], '友善');
     });
   } finally { await h.close(); }
 });

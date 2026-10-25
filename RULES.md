@@ -34,6 +34,12 @@
 
 ## QQ 会话 agent 的硬边界
 
+默认工具面保持下列边界。非空 `allowedMcpTools` 已拒绝；第三方能力应迁移到受权限代理控制的 `framework.services`，不能直连绕过审批。bridge 的会话 API 不赋予控制台权限，但第三方工具自身的执行权限由其宿主负责。接入约定见 [扩展接口](docs/guides/EXTENSION_API.md)。
+
+内容框架中的服务由管理员在 `framework.services` 注册，默认不可调用；需在 `framework.permissions.rules` 授予准确会话/能力及数据范围。ask、write/execute 需要控制台批准后用相同参数和 approvalId 执行一次，模型不能自行批准。服务本身是受信扩展，按其宿主权限运行，不能指定任意启动命令或修改注册表。新媒体输出使用绑定会话的临时媒体 ID，来源与生命周期见 [内容框架](docs/guides/CONTENT_FRAMEWORK.md)，权限见 [授权与审批](docs/guides/EXTENSION_PERMISSIONS.md)。
+
+记忆功能整体由 `memory.providers` 提供，`memory.provider` 指定默认值；旧接口仅为协议适配，不读取内置记忆对象，不自动拼接记忆或外传历史。命名空间由部署密钥+会话+提供者派生，提供者必须据此隔离数据。query、各变更操作与 ingest 分别授权；变更逐次审批，ingest 仍只能选定当前会话真实消息。旧字段归档失败时拒绝启动，不用空数据覆盖。协议与边界见 [开放记忆](docs/guides/MEMORY_PROVIDERS.md)。
+
 1. **无本地工具**：qq-chat / qq-chat-v2 预设不挂载 bash/pwsh、文件读写、子代理、工作流——群友无论如何诱导，agent 物理上无法操作本机。
 2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 三个命名空间下的工具，以及 `ask_user_question` / `todo_write`；其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。QQ 动作无禁言、踢人、文件上传下载等管理操作。
 3. **只读联网搜索**：`qq-chat` / `qq-chat-v2` 预设已关闭 DSH 内置 `tool-web` 的 `search` / `fetch`，联网统一走 `src/mcp-web-search-safe.js` 提供的 `mcp__web-search-safe__web_search/web_fetch`。不暴露本地文件、命令执行、写操作。
@@ -66,7 +72,7 @@
 
 - 桥接会把普通群聊消息放入滚动窗口（`state/slang.json` 的候选来源），攒够 `slang.extractMinMessages` 条后交给独立 DSH 学习会话提取“疑似黑话”。
 - 候选默认 **不自动转正**：DSH 可联网搜索生成含义/用法/示例，但最终必须由管理员在控制台「黑话词库」里 **确认 / 拒绝 / 编辑 / 删除**。
-- 只有 `status: confirmed` 且含义非空的词条会被注入 QQ 聊天 agent 的 prompt（`【群聊黑话表】`），且按出现次数排序、最多 `slang.injectMax` 条。
+- 只有 `status: confirmed` 且含义非空的词条可供模型查询。默认 `socialV2.context.strategy: "on-demand"` 不在每次投递时注入词表；按需查询匹配词。回退为 `inline` 时仍按出现次数排序、最多注入 `slang.injectMax` 条。
 - 学习会话与 QQ 会话隔离：学习任务的输出不会发到 QQ；它只读消息文本，不执行本地操作。
 - 学习会话不会向用户提问/请求审批，桥接会自动跳过这类请求，避免阻塞学习任务。
 - `web_search` 工具返回的搜索摘要仅作为候选解释，不视为权威；控制台可随时修改或拒绝。

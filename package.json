@@ -62,7 +62,12 @@
     "privacy-scan": "node scripts/privacy-scan.mjs",
     "diagnose:acl": "node scripts/diagnose-acl.mjs",
     "harden-acl": "node scripts/harden-state-acl.mjs",
-    "test:dual": "node scripts/test-dual-mode.mjs && node --test src/core/session-router.test.mjs"
+    "test:dual": "node scripts/test-dual-mode.mjs && node --test src/core/session-router.test.mjs",
+    "test:context": "node --test scripts/test-context-api.mjs",
+    "test:framework": "node --test scripts/test-content-framework.mjs",
+    "test:permissions": "node --test scripts/test-extension-permissions.mjs",
+    "test:permissions:ui": "node scripts/test-extension-permissions-ui.mjs",
+    "test:memory": "node --test scripts/test-memory-providers.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh-host-apiproxy": "0.1.1-rc.2",

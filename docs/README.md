@@ -9,6 +9,14 @@
 
 ## guides/ —— 面向使用者 / 运维
 
+按需上下文、API v1、JavaScript 客户端和外部 MCP / skill runner 接入见 [EXTENSION_API.md](guides/EXTENSION_API.md)。
+
+消息类型、媒体句柄、按需 MCP/HTTP 服务分发与统一输出见 [CONTENT_FRAMEWORK.md](guides/CONTENT_FRAMEWORK.md)。
+
+扩展默认拒绝、会话授权、管理员一次性审批与已实现边界见 [EXTENSION_PERMISSIONS.md](guides/EXTENSION_PERMISSIONS.md)。
+
+内置记忆整体替换为开放提供者，HTTP/MCP 协议、数据归档与迁移见 [MEMORY_PROVIDERS.md](guides/MEMORY_PROVIDERS.md)。
+
 | 文档 | 一句话说明 | 状态 |
 | --- | --- | --- |
 | [guides/PROJECT_GUIDE.md](guides/PROJECT_GUIDE.md) | **权威项目说明书**（113 KB / 1450+ 行）：架构、内外核划分、数据流、配置全解、安全机制、调试与改进指南，含 2026-08-20 ~ 2026-09-11 的逐轮更新记录 | ✅ **唯一权威版本**（另一份同名精简版已归档到 legacy，见下） |

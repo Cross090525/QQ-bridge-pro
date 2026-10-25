@@ -8,6 +8,15 @@
 import fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { normalizeDualMode, createDualModeRouter, legacyModeOf } from './core/dual-mode.mjs';
+import { CONTEXT_KINDS, normalizeContextQuery, queryConversationContext } from './core/context-query.mjs';
+import { BRIDGE_API_VERSION, PUBLIC_API_ROUTES, resolvePublicApiRoute } from './core/public-api.mjs';
+import { ContentSourceStore, normalizeIncomingContent, normalizeOutgoingContent, frameworkError } from './framework/content.mjs';
+import { FrameworkMediaStore } from './framework/media-store.mjs';
+import { ContentServiceRuntime } from './framework/services.mjs';
+import { ExtensionPermissions, normalizePermissionPolicy, permissionDigest } from './framework/permissions.mjs';
+import { MemoryProviderRuntime } from './framework/memory-providers.mjs';
+import { archiveLegacyMemory, legacyMemoryOperation } from './framework/memory-compat.mjs';
+let closeContentServices = async () => {};
 import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
@@ -23,7 +32,7 @@ import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-p
 import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { compactModelMessage } from './qq-model-view.js';
-import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
+import { safeFetchBuffer, safeFetchBytes, looksLikeImageBuffer } from './safe-fetch.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
@@ -693,6 +702,8 @@ function loadConfig() {
     questionTimeoutMs: file.questionTimeoutMs ?? 5 * 60 * 1000,
     consolePort: file.consolePort ?? 3100,
     consoleToken: file.consoleToken ?? '',
+    framework: file.framework ?? { services: [] },
+    memory: file.memory ?? { provider: null, providers: [] },
     // 价目表覆盖项（可选）。留空即用 src/model-prices.js 的官方默认价。
     pricing: file.pricing ?? null,
     security: {
@@ -853,6 +864,7 @@ function loadConfig() {
         notifyOwnerOnError: false
       },
       context: {
+        strategy: 'on-demand',
         recentLimit: 100,
         unreadLimit: 30,
         contextWindow: 20,
@@ -875,9 +887,20 @@ function loadConfig() {
     }
   };
 
+  cfg.socialV2.context = {
+    strategy: 'on-demand', recentLimit: 100, unreadLimit: 30, contextWindow: 20,
+    inlineWakeMessages: true, wakeMessageLimit: 12, wakeRecentLimit: 4, wakeMaxChars: 6000,
+    ...(cfg.socialV2?.context ?? {})
+  };
+  if (!['on-demand', 'inline'].includes(cfg.socialV2.context.strategy)) {
+    throw new Error('socialV2.context.strategy 必须为 on-demand 或 inline');
+  }
   // socialV2.tools 需要与默认值深度合并：旧 config.json 若缺少新增工具开关，
   // 不能因为外层 spread 覆盖而丢失默认开关。
   cfg.socialV2.tools = {
+    contextQuery: true,
+    contentServices: true,
+    contentSend: true,
     getPrompt: true,
     getUnread: true,
     getRecent: true,
@@ -1388,6 +1411,154 @@ async function main() {
   hardenStateDirAcl();
   acquireLock();
   loadState();
+  const sourceFile = path.join(STATE_DIR, 'content-sources.json');
+  let sourceRecords = [];
+  let sourceStoreWritable = true;
+  try { if (fs.existsSync(sourceFile)) sourceRecords = JSON.parse(fs.readFileSync(sourceFile, 'utf8')); }
+  catch { sourceStoreWritable = false; log('内容资源索引读取失败，仅在内存保存新引用，请修复后重启'); }
+  if (!Array.isArray(sourceRecords)) { sourceRecords = []; sourceStoreWritable = false; }
+  const contentSources = new ContentSourceStore(sourceRecords, { onChange: records => {
+    if (!sourceStoreWritable) return;
+    try { atomicWriteJson(sourceFile, records); } catch (error) { log('保存内容资源索引失败:', error?.message); }
+  } });
+  const frameworkMedia = new FrameworkMediaStore({ directory: path.join(STATE_DIR, 'framework-media'),
+    validateImage: buffer => acceptImageBuffer(buffer) });
+  const extensionAuditFile = path.join(STATE_DIR, 'extension-audit.json');
+  let extensionAudit = [];
+  let extensionAuditWritable = true;
+  try {
+    if (fs.existsSync(extensionAuditFile)) extensionAudit = JSON.parse(fs.readFileSync(extensionAuditFile, 'utf8'));
+    if (!Array.isArray(extensionAudit)) throw new Error('invalid audit');
+  } catch { extensionAudit = []; extensionAuditWritable = false; log('扩展审计读取失败，扩展执行将拒绝，修复后重启'); }
+  const extensionPermissions = new ExtensionPermissions({ policy: cfg.framework?.permissions ?? {}, audit: extensionAudit, onAudit: entries => {
+    if (!extensionAuditWritable) throw new Error('audit read-only');
+    atomicWriteJson(extensionAuditFile, entries);
+  } });
+  const contentServices = new ContentServiceRuntime({ services: cfg.framework?.services ?? [], permissions: extensionPermissions,
+    mediaStore: frameworkMedia, readSource: readFrameworkSource });
+  let memoryNamespaceSalt = '';
+  if (cfg.memory?.providers?.length) {
+    const namespaceFile = path.join(STATE_DIR, 'memory-namespace.json');
+    if (!fs.existsSync(namespaceFile)) atomicWriteJson(namespaceFile, { salt: crypto.randomBytes(32).toString('hex') });
+    try { memoryNamespaceSalt = JSON.parse(fs.readFileSync(namespaceFile, 'utf8')).salt; }
+    catch { throw frameworkError('记忆命名空间文件损坏，拒绝启动；请恢复原文件，不能自动重置', 503); }
+  }
+  const memoryProviders = new MemoryProviderRuntime({ providers: cfg.memory?.providers ?? [], defaultProvider: cfg.memory?.provider ?? null,
+    namespaceSalt: memoryNamespaceSalt, permissions: extensionPermissions, getMessages: (key, seqs) => {
+      if (modeFor(key) !== 'reserved2') throw frameworkError('当前模式不提供桥接近期消息导出', 403);
+      return (socialV2.conversations.get(key)?.recentMessages ?? []).filter(message => seqs.includes(message.seq))
+        .map(message => ({ ...message, plain: redactKnownTokensOnly(String(message.plain ?? message.text ?? '')) }));
+    } });
+  closeContentServices = () => Promise.allSettled([contentServices.close(), memoryProviders.close()]);
+  const frameworkScope = (key, token) => crypto.createHash('sha256').update(`${key}\0${token}`).digest('hex');
+
+  async function readFrameworkSource(source) {
+    let url = source.url;
+    let localFile = '';
+    if (!url && source.type === 'voice' && source.file && !/[\\/]|\.\.|:/.test(source.file)) {
+      const result = await bot.raw('get_record', { file: source.file, out_format: 'wav' });
+      const info = result?.data ?? result;
+      url = info?.url;
+      localFile = info?.file || '';
+    }
+    let buffer;
+    if (url) buffer = (await safeFetchBytes(url, 8 * 1024 * 1024)).buffer;
+    else {
+      const candidate = localFile || source.file;
+      const roots = (Array.isArray(cfg.framework?.mediaRoots) ? cfg.framework.mediaRoots : []).filter(Boolean);
+      if (!candidate || !path.isAbsolute(candidate)) throw frameworkError('网关未提供可下载的媒体；请配置媒体根目录或提供 URL', 422);
+      let resolved;
+      try { resolved = fs.realpathSync(candidate); } catch { throw frameworkError('媒体缓存不存在或不可读', 422); }
+      const inside = roots.some(root => {
+        try { const parent = fs.realpathSync(root); return resolved.startsWith(parent + path.sep); } catch { return false; }
+      });
+      if (!inside) throw frameworkError('媒体不在已配置的网关缓存根目录内', 403);
+      let descriptor;
+      try {
+        descriptor = fs.openSync(resolved, 'r');
+        const stat = fs.fstatSync(descriptor);
+        if (!stat.isFile() || stat.size > 8 * 1024 * 1024) throw frameworkError('媒体文件无效或超过 8MB', 413);
+        buffer = Buffer.alloc(stat.size);
+        let offset = 0;
+        while (offset < buffer.length) { const read = fs.readSync(descriptor, buffer, offset, buffer.length - offset, null); if (!read) break; offset += read; }
+        buffer = buffer.subarray(0, offset);
+      } catch (error) { if (error.statusCode) throw error; throw frameworkError('媒体缓存不可读取', 422); }
+      finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
+    }
+    if (buffer.length > 8 * 1024 * 1024) throw frameworkError('媒体超过 8MB', 413);
+    const head = buffer.toString('ascii', 0, 12);
+    const mimeType = looksLikeImageBuffer(buffer) ? mimeFromBuffer(buffer) : head.startsWith('RIFF') && head.slice(8, 12) === 'WAVE' ? 'audio/wav'
+      : head.startsWith('OggS') ? 'audio/ogg' : head.startsWith('fLaC') ? 'audio/flac'
+        : head.startsWith('ID3') || (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0) ? 'audio/mpeg'
+          : head.startsWith('#!AMR') ? 'audio/amr' : head.includes('SILK_V3') ? 'audio/silk'
+            : source.type === 'video' ? 'video/mp4' : 'application/octet-stream';
+    if (source.type === 'voice' && !mimeType.startsWith('audio/')) throw frameworkError('该资源不是可识别的音频格式', 422);
+    if (['image', 'sticker'].includes(source.type) && !acceptImageBuffer(buffer)) throw frameworkError('该资源不是可识别的图片', 422);
+    return { data: buffer.toString('base64'), mimeType, bytes: buffer.length };
+  }
+
+  async function sendFrameworkMedia(key, scope, output) {
+    const guard = captureSendGuard(key);
+    guard();
+    if (shouldBlockSilentReply(key)) throw frameworkError('静默模式已开启', 403);
+    const isOwner = modeFor(key) === 'closed-agent';
+    if (output.type === 'voice') {
+      if (!v2ToolEnabled('sendVoice') || !voiceCfg().enabled) throw frameworkError('语音发送未启用', 403);
+      const item = output.mediaId ? frameworkMedia.get(scope, output.mediaId) : null;
+      if (item && item.type !== 'voice') throw frameworkError('mediaId 不是语音');
+      const file = item?.path ?? resolveVoicePathForV2(output.voice).path;
+      const vc = voiceCfg(); voiceBudgetCheck(key, vc);
+      const sent = await sendVoiceV2(key, file, { guard: true, audit: true });
+      voiceBudgetCommit(key);
+      if (!isOwner) recordVoiceSentV2(key, sent, '语音回复');
+      return { sent: 1, messageId: sent.messageId, type: 'voice' };
+    }
+    if (!['image', 'sticker'].includes(output.type)) throw frameworkError('不支持的媒体输出');
+    if (!v2ToolEnabled(output.type === 'sticker' ? 'sendSticker' : 'sendMessage')
+        || (output.type === 'sticker' && !stickerEnabled())) throw frameworkError('媒体发送未启用', 403);
+    const st = isOwner ? null : getSocialV2State(key);
+    const now = Date.now();
+    const sendCfg = cfg.socialV2?.send ?? {};
+    if (st) {
+      for (const [windowMs, limit] of [[60000, Number(sendCfg.maxSendPerMinute)], [3600000, Number(sendCfg.maxSendPerHour)]]) {
+        if (limit > 0 && st.sendTimes.filter(time => now - time < windowMs).length >= limit) throw frameworkError('发送频率超限', 429);
+      }
+      st.sendTimes.push(now);
+    }
+    try {
+      let sent;
+      if (output.stickerId) sent = await sendStickerV2(key, output.stickerId);
+      else {
+        const item = frameworkMedia.get(scope, output.mediaId);
+        if (item.type !== 'image') throw frameworkError('mediaId 不是图片');
+        const bytes = fs.readFileSync(item.path);
+        if (!acceptImageBuffer(bytes)) throw frameworkError('图片不可发送');
+        assertOutboundAuditOk(key, `[${output.type}]`);
+        const [kind, id] = key.split(':');
+        let resolveSend, rejectSend;
+        const completed = new Promise((resolve, reject) => { resolveSend = resolve; rejectSend = reject; });
+        sendChain = sendChain.then(async () => {
+          try {
+            guard();
+            const message = [{ type: 'image', data: { file: 'base64://' + bytes.toString('base64'), ...(output.type === 'sticker' ? { sub_type: 1 } : {}) } }];
+            const response = await fetch(`${String(cfg.snowluma.httpUrl).replace(/\/$/, '')}/${kind === 'group' ? 'send_group_msg' : 'send_private_msg'}`, {
+              method: 'POST', headers: { 'content-type': 'application/json', ...(cfg.snowluma.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {}) },
+              body: JSON.stringify(kind === 'group' ? { group_id: Number(id), message } : { user_id: Number(id), message }), signal: AbortSignal.timeout(15000),
+            });
+            const result = await response.json();
+            if (!response.ok || result.status !== 'ok' || result.retcode !== 0) throw frameworkError('QQ 网关发送媒体失败', 502);
+            resolveSend({ messageId: result.data?.message_id ?? null });
+          } catch (error) { rejectSend(error); }
+        });
+        sent = await completed;
+      }
+      if (!isOwner) recordSentMessagesV2(key, [`[${output.type}]`]);
+      return { sent: 1, messageId: sent.messageId ?? null, type: output.type };
+    } catch (error) {
+      if (st) { const index = st.sendTimes.indexOf(now); if (index >= 0) st.sendTimes.splice(index, 1); }
+      throw error;
+    }
+  }
 
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
   let slangEntries = [];
@@ -2304,7 +2475,7 @@ async function main() {
     const now = new Date();
     const timeLine = `【当前时间】${now.toLocaleString('zh-CN', { hour12: false })}（${Intl.DateTimeFormat().resolvedOptions().timeZone}）`;
     const parts = [timeLine];
-    if (cfg.slang?.enabled !== false) {
+    if (cfg.slang?.enabled !== false && cfg.socialV2?.context?.strategy === 'inline') {
       const block = buildSlangContext(slangEntries, cfg.slang?.injectMax ?? 8);
       if (block) parts.push(block);
     }
@@ -3231,7 +3402,7 @@ async function main() {
       };
       let bodyPromise;
       const readBody = () => bodyPromise ??= new Promise((resolve, reject) => {
-        const MAX_BODY_BYTES = 1_000_000;
+        const MAX_BODY_BYTES = url.pathname === '/api/socialV2/content-upload' ? 12 * 1024 * 1024 : 1_000_000;
         const chunks = [];
         let total = 0;
         let settled = false;
@@ -3306,6 +3477,30 @@ async function main() {
         sendJson({ ok: false, error: `Host 头不被允许（${hostHeader || '缺失'}）：控制台只接受本机回环访问` }, 403);
         return;
       }
+      // Public extension routes use ONLY a live conversation token. Never give
+      // an external MCP/skill the console credential or an arbitrary API proxy.
+      const publicApi = url.pathname.startsWith('/api/v1/')
+        ? resolvePublicApiRoute(req.method, url.pathname) : null;
+      const isPublicApi = url.pathname.startsWith('/api/v1/');
+      if (isPublicApi) {
+        if (!publicApi) { sendJson({ ok: false, error: '未知的 v1 接口或请求方法' }, 404); return; }
+        const token = req.headers['x-agent-token'];
+        const key = requestKey();
+        if (typeof token !== 'string' || !token || !key || !isLiveAgentToken(token)
+            || (!ownerRequest() && !v2SessionAllowed(key))) {
+          sendJson({ ok: false, error: '必须提供有效的当前会话令牌' }, 401); return;
+        }
+        req.headers['x-agent-call'] = '1';
+        // Keep explicit mismatches for the scope check below; omitted keys are
+        // resolved from the authenticated session, never from the caller's claim.
+        if (!url.searchParams.has('key')) url.searchParams.set('key', key);
+        url.pathname = publicApi.target;
+        if (ownerRequest() && publicApi.path === '/api/v1/messages/send') url.pathname = '/api/send/private';
+      }
+      const frameworkRoute = /^\/api\/socialV2\/content-(services|process|send|media|upload)$/.test(url.pathname);
+      const legacyMemoryRoute = /^\/api\/socialV2\/memory(?:-(append|update|remove|clear))?$/.test(url.pathname);
+      const memoryRoute = /^\/api\/memory\/(providers|query|write|update|delete|clear|ingest)$/.test(url.pathname) || legacyMemoryRoute;
+      const frameworkOperation = frameworkRoute ? url.pathname : null;
       // 控制台鉴权：所有请求需带 x-console-token 或 ?token=
       // 定长比较：`!==` 会在第一个不同的字符处短路，理论上可被本机进程用响应时延逐字节试探。
       // 令牌是 192 bit 随机值且只监听回环，所以这是纵深防御而非在野漏洞。
@@ -3317,7 +3512,7 @@ async function main() {
         if (a.length !== b.length) return false;
         return crypto.timingSafeEqual(a, b);
       })();
-      if (consoleToken && !tokenMatches) {
+      if (consoleToken && !tokenMatches && !isPublicApi) {
         if (req.method === 'GET' && url.pathname === '/') {
           res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
           res.end('<!doctype html><meta charset="utf-8"><title>需要令牌</title><script>const t=prompt(\'请输入控制台访问令牌\');if(t)location.href=\'/?token=\'+encodeURIComponent(t);</script>');
@@ -3355,7 +3550,7 @@ async function main() {
         if (routing() && !hasToken && url.pathname !== '/api/status') {
           sendJson({ ok: false, error: '双模式工具调用必须携带当前会话令牌' }, 403); return;
         }
-        if (ownerRequest() && url.pathname !== '/api/status' && !url.pathname.startsWith('/api/send/') && !url.pathname.startsWith('/api/images/')) {
+        if (ownerRequest() && !frameworkRoute && !memoryRoute && url.pathname !== '/api/status' && url.pathname !== '/api/bridge/capabilities' && !url.pathname.startsWith('/api/send/') && !url.pathname.startsWith('/api/images/')) {
           sendJson({ ok: false, error: '管理员任务会话不能调用仿真会话或管理接口' }, 403); return;
         }
         if (!hasToken) {
@@ -3388,16 +3583,62 @@ async function main() {
         }
       }
       try {
+        // These endpoints are management-only, even if an agent also supplies a
+        // valid console credential. They are never aliases in the public API.
+        if (url.pathname.startsWith('/api/extensions/')) {
+          if (req.headers['x-agent-token'] !== undefined || req.headers['x-agent-call'] !== undefined || !tokenMatches) {
+            sendJson({ ok: false, error: '扩展授权与审批仅供管理员控制台使用' }, 403); return;
+          }
+          if (req.method === 'GET' && url.pathname === '/api/extensions/permissions') {
+            sendJson({ ok: true, policy: extensionPermissions.policy, defaultDecision: 'deny',
+              capabilities: [...contentServices.services.map(service => ({ id: service.id, effect: service.effect, description: service.description })), ...memoryProviders.capabilities()],
+              mediaCapabilities: ['bridge.media.read', 'bridge.media.upload'] }); return;
+          }
+          if (req.method === 'POST' && url.pathname === '/api/extensions/permissions') {
+            const body = await readBody();
+            const policy = normalizePermissionPolicy(body.policy);
+            const known = new Set([...contentServices.services.map(service => service.id), ...memoryProviders.capabilities().map(item => item.id), 'bridge.media.read', 'bridge.media.upload']);
+            if (policy.rules.some(rule => !known.has(rule.capability))) throw frameworkError('权限规则包含未注册的能力');
+            const file = path.join(ROOT, 'config.json');
+            const config = readConfigObject(file);
+            config.framework = { ...(config.framework ?? {}), permissions: policy };
+            extensionPermissions.record({ event: 'policy-update-requested', actor: 'console', policyHash: permissionDigest(policy) });
+            // Persist first; a failed write cannot silently grant in-memory access.
+            atomicWriteJson(file, config);
+            extensionPermissions.replacePolicy(policy);
+            cfg.framework.permissions = policy;
+            sendJson({ ok: true, policy, note: '策略已生效，旧审批与正在执行的权限租约已失效' }); return;
+          }
+          if (req.method === 'GET' && url.pathname === '/api/extensions/approvals') {
+            sendJson({ ok: true, requests: extensionPermissions.listRequests() }); return;
+          }
+          if (req.method === 'POST' && url.pathname === '/api/extensions/approvals/resolve') {
+            const body = await readBody();
+            sendJson({ ok: true, approval: extensionPermissions.resolve(body.requestId, body.decision) }); return;
+          }
+          if (req.method === 'GET' && url.pathname === '/api/extensions/audit') {
+            sendJson({ ok: true, entries: extensionPermissions.audit }); return;
+          }
+          sendJson({ ok: false, error: '未知扩展管理接口' }, 404); return;
+        }
         // In mixed mode scope all agent requests before touching any endpoint.
         // Capture the binding across body reads; a retired request cannot acquire
         // a replacement session's privileges while waiting for input.
-        if (routing() && req.headers['x-agent-token']) {
+        if ((routing() || isPublicApi || frameworkRoute || memoryRoute) && req.headers['x-agent-token']) {
           const boundKey = requestKey();
-          const policy = boundKey ? sessionPolicy(boundKey) : null;
+          const mixedMode = !!routing();
+          const policy = mixedMode && boundKey ? sessionPolicy(boundKey) : null;
           const sessionId = boundKey ? state.sessions[boundKey] : null;
           requestContext.getStore().assertLive = () => {
-            if (!routing() || !boundKey || requestKey() !== boundKey
-                || state.sessions[boundKey] !== sessionId || sessionPolicy(boundKey) !== policy) {
+            if ((frameworkRoute || memoryRoute) && !ownerRequest() && (socialV2.paused || cfg.socialV2?.enabled === false)) throw frameworkError('二代已暂停或关闭', 403);
+            if (memoryRoute && !v2ToolEnabled('memory')) throw frameworkError('记忆工具未启用', 403);
+            if (frameworkRoute && frameworkOperation !== '/api/socialV2/content-send' && !v2ToolEnabled('contentServices')) {
+              throw frameworkError('内容服务未启用', 403);
+            }
+            if (frameworkOperation === '/api/socialV2/content-send' && !v2ToolEnabled('contentSend')) throw frameworkError('统一消息发送未启用', 403);
+            if (!!routing() !== mixedMode || !boundKey || requestKey() !== boundKey
+                || ((isPublicApi || frameworkRoute) && !ownerRequest() && !v2SessionAllowed(boundKey))
+                || state.sessions[boundKey] !== sessionId || (mixedMode && sessionPolicy(boundKey) !== policy)) {
               const error = new Error('工具请求所属会话已失效');
               error.statusCode = 403;
               throw error;
@@ -3405,13 +3646,84 @@ async function main() {
           };
           const body = req.method === 'GET' ? {} : await readBody();
           const target = body.key ?? url.searchParams.get('key');
-          if (!boundKey || policy !== sessionPolicy(boundKey) || requestKey() !== boundKey
+          if (!boundKey || (mixedMode && policy !== sessionPolicy(boundKey)) || requestKey() !== boundKey
               || (target != null && canonicalV2Key(target) !== boundKey)
+              || (url.searchParams.has('key') && canonicalV2Key(url.searchParams.get('key')) !== boundKey)
               || (body.token && body.token !== req.headers['x-agent-token'])) {
             sendJson({ ok: false, error: '会话已失效或目标不属于当前令牌' }, 403); return;
           }
+          if (isPublicApi && req.method !== 'GET') {
+            body.key = boundKey;
+            if (ownerRequest() && publicApi.path === '/api/v1/messages/send') {
+              if (body.userId != null && String(body.userId) !== boundKey.slice(8)) {
+                sendJson({ ok: false, error: '目标不属于当前令牌' }, 403); return;
+              }
+              if (typeof body.messages !== 'string' || !body.messages.trim()) {
+                sendJson({ ok: false, error: '管理员发送 messages 必须是非空字符串' }, 400); return;
+              }
+              body.userId = boundKey.slice(8);
+              body.message = body.messages;
+            }
+          }
         }
-        if (routing() && url.pathname.startsWith('/api/socialV2/')) {
+        const invokeMemory = async (key, operation, input, providerId, approvalId) => {
+          if (!v2ToolEnabled('memory')) throw frameworkError('记忆工具未启用', 403);
+          const agent = typeof req.headers['x-agent-token'] === 'string';
+          const credential = agent ? req.headers['x-agent-token'] : consoleToken;
+          const requestLive = requestContext.getStore()?.assertLive;
+          const check = () => {
+            requestLive?.();
+            if (!v2ToolEnabled('memory')) throw frameworkError('记忆工具未启用', 403);
+            if (!agent && consoleToken !== credential) throw frameworkError('管理端身份已变化', 403);
+            if (agent && (!agentTokenOk(key, credential) || !ownerRequest() && (!v2SessionAllowed(key) || socialV2.paused || cfg.socialV2?.enabled === false))) throw frameworkError('记忆请求所属会话已失效或暂停', 403);
+            if (operation === 'ingest' && !v2ToolEnabled('getRecent')) throw frameworkError('近期消息读取未启用，拒绝导出', 403);
+          };
+          check();
+          const selected = providerId ?? memoryProviders.defaultProvider;
+          const revision = extensionPermissions.revision;
+          const manifest = permissionDigest(memoryProviders.providers.find(provider => provider.id === selected) ?? null);
+          const result = await memoryProviders.call({ key, scope: frameworkScope(key, agent ? credential : `console:${credential}`),
+            operation, input: redactSensitive(input), providerId: selected, approvalId, assertLive: check });
+          check();
+          if (revision !== extensionPermissions.revision || manifest !== permissionDigest(memoryProviders.providers.find(provider => provider.id === selected) ?? null)) throw frameworkError('记忆提供者或授权已变化', 403);
+          return result;
+        };
+        if (memoryRoute) {
+          const body = req.method === 'GET' ? Object.fromEntries(url.searchParams) : await readBody();
+          const key = requestKey() ?? canonicalV2Key(body.key);
+          if (!key) throw frameworkError('记忆操作需要准确的当前会话 key');
+          if (req.headers['x-agent-token'] !== undefined && (!agentTokenOk(key, req.headers['x-agent-token'])
+              || !ownerRequest() && (!v2SessionAllowed(key) || socialV2.paused || cfg.socialV2?.enabled === false))) throw frameworkError('记忆请求所属会话无效或暂停', 403);
+          if (req.headers['x-agent-token'] && (body.key && canonicalV2Key(body.key) !== key)) throw frameworkError('记忆目标不属于当前会话', 403);
+          if (!v2ToolEnabled('memory')) throw frameworkError('记忆工具未启用', 403);
+          if (req.method === 'GET' && url.pathname === '/api/memory/providers') {
+            const providers = memoryProviders.list(key);
+            sendJson({ ok: true, providers, defaultProvider: providers.some(provider => provider.id === memoryProviders.defaultProvider) ? memoryProviders.defaultProvider : null,
+              protocol: 'qq-bridge.memory/v1', builtin: false }); return;
+          }
+          let operation; let input;
+          if (legacyMemoryRoute) {
+            if (req.method !== (url.pathname === '/api/socialV2/memory' ? 'GET' : 'POST')) throw frameworkError('记忆接口方法无效', 405);
+            ({ operation, input } = legacyMemoryOperation(url.pathname, body));
+          } else {
+            if (req.method !== 'POST') throw frameworkError('记忆接口需要 POST', 405);
+            if (Object.keys(body).some(field => !['key', 'providerId', 'approvalId', 'input'].includes(field))) throw frameworkError('记忆请求含未知字段，命名空间由桥接生成');
+            operation = url.pathname.split('/').at(-1); input = body.input ?? {};
+          }
+          const result = await invokeMemory(key, operation, input, body.providerId, body.approvalId);
+          sendJson({ ok: true, key, ...result }, result.status === 'approval_required' ? 202 : 200); return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/content-send') {
+          if (!v2ToolEnabled('contentSend')) { sendJson({ ok: false, error: '统一消息发送未启用' }, 403); return; }
+          const body = await readBody();
+          const output = normalizeOutgoingContent(body.content);
+          if (output.type === 'text' || output.type === 'link') {
+            body.messages = output.messages;
+            url.pathname = ownerRequest() ? '/api/send/private' : '/api/socialV2/send-message';
+            if (ownerRequest()) { body.userId = requestKey().slice(8); body.message = output.messages; }
+          }
+        }
+        if (routing() && url.pathname.startsWith('/api/socialV2/') && !(frameworkRoute && ownerRequest())) {
           const body = req.method === 'GET' ? {} : await readBody();
           const target = body.key ?? url.searchParams.get('key');
           if (target && (!canonicalV2Key(target) || modeFor(canonicalV2Key(target)) !== 'reserved2')) {
@@ -3434,7 +3746,7 @@ async function main() {
           return;
         }
         // 模式隔离：带 agent token 的 v2 接口只允许在 reserved2 模式下使用
-        if (req.headers['x-agent-token'] && url.pathname.startsWith('/api/socialV2/') && requestMode() !== 'reserved2') {
+        if (req.headers['x-agent-token'] && url.pathname.startsWith('/api/socialV2/') && requestMode() !== 'reserved2' && !(frameworkRoute && ownerRequest())) {
           sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403);
           return;
         }
@@ -3459,7 +3771,8 @@ async function main() {
             || url.pathname.startsWith('/api/socialV2/')
             || url.pathname.startsWith('/api/send/')
             || url.pathname.startsWith('/api/images/')
-            || url.pathname === '/api/authorize/read';
+            || url.pathname === '/api/authorize/read'
+            || url.pathname === '/api/bridge/capabilities';
           if (!agentAllowed) {
             sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
             return;
@@ -4514,7 +4827,7 @@ async function main() {
             merged.autoReplyCheckMs = Number.isFinite(n) ? Math.max(1000, Math.round(n)) : (current.autoReplyCheckMs ?? 30000);
           }
           // tools：只接受布尔开关
-          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
+          const toolFlags = ['contextQuery', 'contentServices', 'contentSend', 'getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
           if (body.tools && typeof body.tools === 'object') {
             merged.tools = { ...(current.tools ?? {}), ...body.tools };
             for (const k of toolFlags) {
@@ -4617,6 +4930,9 @@ async function main() {
           // context：数值归一化
           if (body.context && typeof body.context === 'object') {
             merged.context = { ...(current.context ?? {}), ...body.context };
+            if (merged.context.strategy !== undefined && !['on-demand', 'inline'].includes(merged.context.strategy)) {
+              sendJson({ ok: false, error: 'context.strategy 必须为 on-demand 或 inline' }, 400); return;
+            }
             for (const k of ['recentLimit', 'unreadLimit', 'contextWindow']) {
               if (merged.context[k] !== undefined) {
                 const n = Number(merged.context[k]);
@@ -4715,6 +5031,112 @@ async function main() {
           sendJson({ ok: true });
           return;
         }
+        if (frameworkRoute && url.pathname.startsWith('/api/socialV2/content-')) {
+          const key = requestKey();
+          if (!key || (!ownerRequest() && !v2SessionAllowed(key))) { sendJson({ ok: false, error: '需要当前会话令牌' }, 403); return; }
+          const body = req.method === 'GET' ? {} : await readBody();
+          if ((body.key && canonicalV2Key(body.key) !== key) || (url.searchParams.has('key') && canonicalV2Key(url.searchParams.get('key')) !== key)) {
+            sendJson({ ok: false, error: '资源不属于当前会话' }, 403); return;
+          }
+          const scope = frameworkScope(key, req.headers['x-agent-token']);
+          if (url.pathname !== '/api/socialV2/content-send' && !v2ToolEnabled('contentServices')) {
+            sendJson({ ok: false, error: '内容服务未启用' }, 403); return;
+          }
+          if (req.method === 'GET' && url.pathname === '/api/socialV2/content-services') {
+            const sourceId = url.searchParams.get('sourceId');
+            const source = sourceId ? contentSources.get(key, sourceId) : null;
+            sendJson({ ok: true, key, services: contentServices.list(source, { key }), outputs: ['text', 'link', 'image', 'sticker', 'voice'], dispatch: 'on-demand', defaultDecision: 'deny' }); return;
+          }
+          if (req.method === 'GET' && url.pathname === '/api/socialV2/content-media') {
+            const source = contentSources.get(key, url.searchParams.get('sourceId'));
+            const permit = extensionPermissions.authorize({ key, scope, capability: 'bridge.media.read', source,
+              manifest: { effect: 'read', destination: '当前会话客户端', entrypoint: '受限媒体字节读取' },
+              dataScopes: ['source-bytes'], approvalId: url.searchParams.get('approvalId') ?? undefined,
+              assertLive: requestContext.getStore()?.assertLive });
+            if (permit.pending) { sendJson({ ok: true, ...permit.pending }, 202); return; }
+            try {
+              const media = await readFrameworkSource(source); permit.check(); permit.finish('completed');
+              sendJson({ ok: true, key, sourceId: source.sourceId, ...media });
+            } catch (error) { permit.finish('failed'); throw error; }
+            return;
+          }
+          if (req.method === 'POST' && url.pathname === '/api/socialV2/content-upload') {
+            const permit = extensionPermissions.authorize({ key, scope, capability: 'bridge.media.upload', input: { mimeType: body.mimeType, data: body.data },
+              manifest: { effect: 'generate', destination: '会话临时媒体库', entrypoint: '上传媒体' }, dataScopes: ['media-upload'],
+              approvalId: body.approvalId, assertLive: requestContext.getStore()?.assertLive });
+            if (permit.pending) { sendJson({ ok: true, ...permit.pending }, 202); return; }
+            let media;
+            try { media = frameworkMedia.put(scope, body); permit.check(); permit.finish('completed'); }
+            catch (error) { permit.finish('failed'); throw error; }
+            sendJson({ ok: true, key, media }); return;
+          }
+          if (req.method === 'POST' && url.pathname === '/api/socialV2/content-process') {
+            const source = body.sourceId ? contentSources.get(key, body.sourceId) : null;
+            const requestLive = requestContext.getStore()?.assertLive;
+            const sourceHash = source ? permissionDigest(source) : null;
+            const check = () => {
+              requestLive?.();
+              if (source && permissionDigest(contentSources.get(key, source.sourceId)) !== sourceHash) throw frameworkError('内容来源已变化', 403);
+              if ((!ownerRequest() && (socialV2.paused || !v2SessionAllowed(key) || cfg.socialV2?.enabled === false)) || !v2ToolEnabled('contentServices')) throw frameworkError('内容处理权限已失效', 403);
+            };
+            const permissionRevision = extensionPermissions.revision;
+            const serviceHash = permissionDigest(contentServices.services.find(service => service.id === body.serviceId) ?? null);
+            const result = await contentServices.call({ key, scope, serviceId: body.serviceId, source, input: body.input, approvalId: body.approvalId, assertLive: check });
+            check();
+            if (permissionRevision !== extensionPermissions.revision || serviceHash !== permissionDigest(contentServices.services.find(service => service.id === body.serviceId) ?? null)) throw frameworkError('扩展权限或服务版本已变化', 403);
+            sendJson({ ok: true, key, ...result }, result.status === 'approval_required' ? 202 : 200); return;
+          }
+          if (req.method === 'POST' && url.pathname === '/api/socialV2/content-send') {
+            const result = await sendFrameworkMedia(key, scope, normalizeOutgoingContent(body.content));
+            sendJson({ ok: true, key, ...result }); return;
+          }
+        }
+        if (req.method === 'GET' && url.pathname === '/api/bridge/capabilities') {
+          const owner = ownerRequest();
+          const kinds = owner || !v2ToolEnabled('contextQuery') ? [] : CONTEXT_KINDS.filter(kind =>
+            v2ToolEnabled({ memory: 'memory', slang: 'slangQuery', history: 'getRecent', role: 'getPrompt' }[kind])
+            && (kind !== 'slang' || cfg.slang?.enabled !== false) && (kind !== 'memory' || memoryProviders.list(requestKey()).some(provider => provider.id === memoryProviders.defaultProvider && provider.operations.some(item => item.operation === 'query'))));
+          sendJson({
+            ok: true, apiVersion: BRIDGE_API_VERSION, key: requestKey(), mode: requestMode(),
+            contextStrategy: cfg.socialV2?.context?.strategy ?? 'on-demand', contextKinds: kinds,
+            contentFramework: { dispatch: 'on-demand', permissions: 'per-conversation', defaultDecision: 'deny',
+              serviceCount: contentServices.list(null, { key: requestKey() }).length, outputs: ['text', 'link', 'image', 'sticker', 'voice'] },
+            limits: { contextMaxChars: 12000, contextMaxItems: 20 },
+            routes: PUBLIC_API_ROUTES.filter(route => owner
+              ? (route.path.startsWith('/api/v1/memory/') || ['/api/v1/capabilities', '/api/v1/messages/send', '/api/v1/content/services', '/api/v1/content/process', '/api/v1/content/send', '/api/v1/media/read', '/api/v1/media/upload'].includes(route.path)) && (!route.flag || v2ToolEnabled(route.flag))
+              : route.path === '/api/v1/context/query' ? kinds.length > 0 : !route.flag || v2ToolEnabled(route.flag))
+              .map(({ method, path }) => ({ method, path })),
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/context-query') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          if (!canonicalV2Key(key)) { sendJson({ ok: false, error: '无效的会话 key' }, 400); return; }
+          if (req.headers['x-agent-token'] && (!agentTokenOk(key, req.headers['x-agent-token']) || !v2SessionAllowed(key))) {
+            sendJson({ ok: false, error: '会话令牌无效或目标不被允许' }, 403); return;
+          }
+          const query = normalizeContextQuery(body);
+          const flag = { memory: 'memory', slang: 'slangQuery', history: 'getRecent', role: 'getPrompt' }[query.kind];
+          if (req.headers['x-agent-token'] && (!v2ToolEnabled('contextQuery') || !v2ToolEnabled(flag))) {
+            sendJson({ ok: false, error: '该上下文查询工具未启用' }, 403); return;
+          }
+          if (query.kind === 'slang' && cfg.slang?.enabled === false) {
+            sendJson({ ok: false, error: '黑话功能未启用' }, 403); return;
+          }
+          const roleText = query.kind === 'role' ? currentRoleHintV2() : '';
+          if (query.kind === 'memory') {
+            const { kind, ...input } = query;
+            const result = await invokeMemory(key, 'query', input, body.providerId, body.approvalId);
+            sendJson({ ok: true, key, ...result }, result.status === 'approval_required' ? 202 : 200); return;
+          }
+          const result = queryConversationContext({
+            state: getSocialV2State(key), slangEntries,
+            role: { name: readRoleState().role, text: roleText, version: crypto.createHash('sha256').update(roleText).digest('hex').slice(0, 16) },
+          }, query);
+          sendJson({ ok: true, key, ...result });
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/state') {
           const key = String(url.searchParams.get('key') ?? '').trim();
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
@@ -4747,6 +5169,9 @@ async function main() {
           }
           const roleState = readRoleState();
           const toolMap = {
+            contentServices: 'qq_content_services / qq_process_content',
+            contentSend: 'qq_send_content',
+            contextQuery: 'qq_context_query',
             getPrompt: 'qq_get_prompt',
             getUnread: 'qq_get_unread_messages',
             getRecent: 'qq_get_recent_messages',
@@ -4763,7 +5188,7 @@ async function main() {
             getActiveMembers: 'qq_get_active_members',
             setWakeConfig: 'qq_set_wake_config',
             markRead: 'qq_mark_read',
-            memory: 'qq_memory_append / qq_memory_query / qq_memory_remove / qq_memory_clear',
+            memory: 'qq_memory_providers / qq_memory / qq_memory_append / qq_memory_query / qq_memory_remove / qq_memory_clear',
             slangQuery: 'qq_slang_query',
             slangSubmit: 'qq_slang_submit',
             getImages: 'qq_get_message_images',
@@ -4794,7 +5219,11 @@ async function main() {
               userId: selfUserId || null,
               line: selfIdentityTextV2().trim() || null
             },
-            role: { name: roleState.role ?? null, hint: requestMode() === 'reserved2' ? currentRoleHintV2() : currentRoleHint() },
+            role: {
+              name: roleState.role ?? null,
+              version: crypto.createHash('sha256').update(currentRoleHintV2()).digest('hex').slice(0, 16),
+              hint: requestMode() === 'reserved2' ? currentRoleHintV2() : currentRoleHint()
+            },
             recommended: cfg.socialV2?.provideRecommendations === false ? null : {
               wake: cfg.socialV2?.wake ?? {},
               send: cfg.socialV2?.send ?? {},
@@ -4807,12 +5236,14 @@ async function main() {
             recentCount: st.recentMessages.length,
             currentWakeConfig: st.wakeConfig,
             wakeSafety: computeWakeSafetyV2(st.wakeConfig),
-            memory: formatMemoryV2(st),
+            memory: null,
+            memoryProvider: cfg.memory?.provider ?? null,
             participation: formatParticipationV2(st),
             slang: {
               enabled: cfg.slang?.enabled !== false,
-              entries: confirmedSlangListV2(),
-              block: buildSlangContext(slangEntries, cfg.slang?.injectMax ?? 8)
+              entries: cfg.socialV2?.context?.strategy === 'inline' ? confirmedSlangListV2() : [],
+              block: cfg.socialV2?.context?.strategy === 'inline' ? buildSlangContext(slangEntries, cfg.slang?.injectMax ?? 8) : '',
+              hint: '按需调用 qq_context_query(kind="slang", query="原词")，无需每轮查询'
             },
             stickers: {
               enabled: cfg.socialV2?.sticker?.enabled !== false,
@@ -6618,159 +7049,6 @@ async function main() {
           sendJson({ ok: true, key, members });
           return;
         }
-        if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-append') {
-          const body = await readBody();
-          const key = String(body.key ?? '').trim();
-          const category = String(body.category ?? '').trim();
-          const content = String(body.content ?? '').trim();
-          const extra = body.extra && typeof body.extra === 'object' ? body.extra : {};
-          if (!key || !category || !content) { sendJson({ ok: false, error: 'key/category/content 不能为空' }, 400); return; }
-          if (!['activeTopic', 'pendingThought', 'memberImpression'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression' }, 400); return; }
-          if (category === 'memberImpression' && !String(extra.target || '').trim()) { sendJson({ ok: false, error: 'memberImpression 需要 extra.target 指定群友名字' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_append' }, 403); return; }
-          const st = getSocialV2State(key);
-          appendMemoryV2(st, category, content, extra);
-          sendJson({ ok: true, key, category, content, memory: formatMemoryV2(st) });
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-update') {
-          const body = await readBody();
-          const key = String(body.key ?? '').trim();
-          const category = String(body.category ?? '').trim();
-          const oldContent = String(body.oldContent ?? '').trim();
-          const target = redactKnownTokensOnly(String(body.target ?? '').trim());
-          const newContent = body.newContent !== undefined && body.newContent !== null ? redactKnownTokensOnly(String(body.newContent).trim()) : undefined;
-          const newExtra = body.newExtra && typeof body.newExtra === 'object' && !Array.isArray(body.newExtra) ? body.newExtra : {};
-          const redactExtra = (v) => redactKnownTokensOnly(String(v ?? '')).trim();
-          const cleanNewExtra = {
-            ...newExtra,
-            pendingQuestion: newExtra.pendingQuestion !== undefined ? redactExtra(newExtra.pendingQuestion) : undefined,
-            participants: Array.isArray(newExtra.participants) ? newExtra.participants.map((p) => redactExtra(p)) : undefined,
-            motivation: newExtra.motivation !== undefined ? redactExtra(newExtra.motivation) : undefined,
-            target: newExtra.target !== undefined ? redactExtra(newExtra.target) : undefined
-          };
-          if (!key || !category) { sendJson({ ok: false, error: 'key/category 不能为空' }, 400); return; }
-          if (!['activeTopic', 'pendingThought', 'memberImpression'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression' }, 400); return; }
-          if (category === 'memberImpression' && !target) { sendJson({ ok: false, error: 'memberImpression 需要 target 指定原群友名字' }, 400); return; }
-          if (category !== 'memberImpression' && !oldContent) { sendJson({ ok: false, error: '该类别需要 oldContent 指定要编辑的记忆内容' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_*' }, 403); return; }
-          const st = getSocialV2State(key);
-          if (category === 'activeTopic' && Array.isArray(st.activeTopics)) {
-            const idx = st.activeTopics.findIndex((t) => String(t?.text ?? '') === oldContent);
-            if (idx < 0) { sendJson({ ok: false, error: '找不到要编辑的 activeTopic' }, 404); return; }
-            if (newContent !== undefined) st.activeTopics[idx].text = newContent.slice(0, 200);
-            if (cleanNewExtra.pendingQuestion !== undefined) st.activeTopics[idx].pendingQuestion = String(cleanNewExtra.pendingQuestion).slice(0, 200);
-            if (Array.isArray(cleanNewExtra.participants)) st.activeTopics[idx].participants = cleanNewExtra.participants.map(String).slice(0, 10);
-          } else if (category === 'pendingThought' && Array.isArray(st.pendingThoughts)) {
-            const idx = st.pendingThoughts.findIndex((t) => String(t?.text ?? '') === oldContent);
-            if (idx < 0) { sendJson({ ok: false, error: '找不到要编辑的 pendingThought' }, 404); return; }
-            if (newContent !== undefined) st.pendingThoughts[idx].text = newContent.slice(0, 200);
-            if (cleanNewExtra.motivation !== undefined) st.pendingThoughts[idx].motivation = String(cleanNewExtra.motivation).slice(0, 50);
-            if (cleanNewExtra.expiresAtMs !== undefined) st.pendingThoughts[idx].expiresAt = Date.now() + Math.max(0, Number(cleanNewExtra.expiresAtMs) || 0);
-          } else if (category === 'memberImpression' && st.memberImpressions && typeof st.memberImpressions === 'object') {
-            const oldTarget = target;
-            if (['__proto__', 'constructor', 'prototype'].includes(oldTarget)) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
-            // 必须命中**已有**条目（own property）：否则任意 target 都能凭空建一条，
-            // 而 'toString'/'valueOf' 这类名字会从 Object.prototype 上取到继承来的函数，
-            // 往函数对象上写 traits —— JSON.stringify 又会把它整个丢掉（静默数据丢失）。
-            if (!Object.prototype.hasOwnProperty.call(st.memberImpressions, oldTarget)) {
-              sendJson({ ok: false, error: '找不到要编辑的群友印象（新印象请用 qq_memory_append 添加）' }, 404);
-              return;
-            }
-            const im = st.memberImpressions[oldTarget];
-            const newTarget = String(cleanNewExtra.target || oldTarget).trim().slice(0, 64);
-            if (!newTarget || ['__proto__', 'constructor', 'prototype'].includes(newTarget)) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
-            if (newContent !== undefined) {
-              im.traits = newContent.split(/[,，、]/).map((s) => s.trim()).filter(Boolean).slice(0, 20);
-            }
-            if (cleanNewExtra.interactionCount !== undefined) im.interactionCount = Math.max(0, Number(cleanNewExtra.interactionCount) || 0);
-            if (newTarget !== oldTarget) delete st.memberImpressions[oldTarget];
-            st.memberImpressions[newTarget] = im;
-            // 与控制台/AI 的 append 路径保持一致：条目数上限 50，超了按 lastSeenAt 淘汰最旧，
-            // 否则 memory-update 能无限塞名字（每次 1MB 请求 → 状态文件与每轮 prompt 一起膨胀）。
-            const impressionEntries = Object.entries(st.memberImpressions);
-            if (impressionEntries.length > 50) {
-              impressionEntries.sort((a, b) => (Number(a[1]?.lastSeenAt) || 0) - (Number(b[1]?.lastSeenAt) || 0));
-              for (let i = 0; i < impressionEntries.length - 50; i += 1) delete st.memberImpressions[impressionEntries[i][0]];
-            }
-          }
-          saveSocialV2State();
-          sendJson({ ok: true, key, category, memory: formatMemoryV2(st) });
-          return;
-        }
-        if (req.method === 'GET' && url.pathname === '/api/socialV2/memory') {
-          const key = String(url.searchParams.get('key') ?? '').trim();
-          const category = String(url.searchParams.get('category') ?? '').trim();
-          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_query' }, 403); return; }
-          const st = getSocialV2State(key);
-          const raw = {
-            activeTopics: Array.isArray(st.activeTopics) ? st.activeTopics.slice(-20) : [],
-            pendingThoughts: Array.isArray(st.pendingThoughts) ? st.pendingThoughts.filter((t) => !t.expiresAt || Date.now() < t.expiresAt).slice(-20) : [],
-            memberImpressions: st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {}
-          };
-          if (category === 'activeTopic') {
-            raw.pendingThoughts = [];
-            raw.memberImpressions = {};
-          } else if (category === 'pendingThought') {
-            raw.activeTopics = [];
-            raw.memberImpressions = {};
-          } else if (category === 'memberImpression') {
-            raw.activeTopics = [];
-            raw.pendingThoughts = [];
-          }
-          sendJson({ ok: true, key, category, formatted: formatMemoryV2({ ...st, ...raw }), raw });
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-remove') {
-          const body = await readBody();
-          const key = String(body.key ?? '').trim();
-          const category = String(body.category ?? '').trim();
-          const content = String(body.content ?? '').trim();
-          const target = String(body.target ?? '').trim();
-          if (!key || !category) { sendJson({ ok: false, error: 'key/category 不能为空' }, 400); return; }
-          if (!['activeTopic', 'pendingThought', 'memberImpression'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression' }, 400); return; }
-          if (category === 'memberImpression' && !target) { sendJson({ ok: false, error: 'memberImpression 需要 target 指定群友名字' }, 400); return; }
-          if (category === 'memberImpression' && ['__proto__', 'constructor', 'prototype'].includes(target)) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
-          if (category !== 'memberImpression' && !content) { sendJson({ ok: false, error: '该类别需要 content 指定要删除的记忆内容' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_remove' }, 403); return; }
-          const st = getSocialV2State(key);
-          if (category === 'activeTopic' && Array.isArray(st.activeTopics)) {
-            st.activeTopics = st.activeTopics.filter((t) => String(t?.text ?? '') !== content);
-          } else if (category === 'pendingThought' && Array.isArray(st.pendingThoughts)) {
-            st.pendingThoughts = st.pendingThoughts.filter((t) => String(t?.text ?? '') !== content);
-          } else if (category === 'memberImpression' && st.memberImpressions && typeof st.memberImpressions === 'object') {
-            delete st.memberImpressions[target];
-          }
-          saveSocialV2State();
-          sendJson({ ok: true, key, category, memory: formatMemoryV2(st) });
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-clear') {
-          const body = await readBody();
-          const key = String(body.key ?? '').trim();
-          const category = String(body.category ?? '').trim();
-          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (category && !['activeTopic', 'pendingThought', 'memberImpression'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
-          if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_clear' }, 403); return; }
-          const st = getSocialV2State(key);
-          if (!category || category === 'activeTopic') st.activeTopics = [];
-          if (!category || category === 'pendingThought') st.pendingThoughts = [];
-          if (!category || category === 'memberImpression') st.memberImpressions = {};
-          saveSocialV2State();
-          sendJson({ ok: true, key, category: category || 'all', memory: formatMemoryV2(st) });
-          return;
-        }
         // ── 二代黑话学习（reserved2）：AI 查询/提交黑话候选 ─────────────────
         if (req.method === 'GET' && url.pathname === '/api/socialV2/slang/query') {
           const key = String(url.searchParams.get('key') ?? '').trim();
@@ -6779,19 +7057,17 @@ async function main() {
           if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('slangQuery')) { sendJson({ ok: false, error: '工具未启用：qq_slang_query' }, 403); return; }
-          const list = confirmedSlangListV2().filter((e) => {
-            if (!q) return true;
-            return e.content.toLowerCase().includes(q)
-              || e.meaning.toLowerCase().includes(q)
-              || e.usage.toLowerCase().includes(q)
-              || e.example.toLowerCase().includes(q);
-          });
+          const result = queryConversationContext({ slangEntries }, { kind: 'slang', query: q });
+          const list = result.items;
           sendJson({
             ok: true,
             key,
-            total: list.length,
+            total: result.total,
             entries: list,
-            block: buildSlangContext(slangEntries, cfg.slang?.injectMax ?? 8)
+            nextOffset: result.nextOffset,
+            truncated: result.truncated,
+            block: cfg.socialV2?.context?.strategy === 'inline'
+              ? buildSlangContext(list.map(entry => ({ ...entry, status: SLANG_STATUS.CONFIRMED })), list.length) : ''
           });
           return;
         }
@@ -8382,9 +8658,6 @@ async function main() {
         lastUnreadSeq: 0,
         lastReadThroughSeq: 0,
         modelSeenSeqs: new Set(),
-        activeTopics: [],
-        pendingThoughts: [],
-        memberImpressions: {}
       };
       rememberAgentToken(key, st.agentToken);
       socialV2.conversations.set(key, st);
@@ -8409,7 +8682,17 @@ async function main() {
           return null;
         }
       })();
-      const raw = readJsonSafe(SOCIAL_V2_FILE, null);
+      let raw = null;
+      try { if (fs.existsSync(SOCIAL_V2_FILE)) raw = JSON.parse(fs.readFileSync(SOCIAL_V2_FILE, 'utf8')); }
+      catch {
+        const error = frameworkError('会话状态无法解析，拒绝启动以免覆盖旧记忆；请先恢复原文件', 503);
+        error.code = 'MEMORY_MIGRATION_BACKUP_FAILED'; throw error;
+      }
+      if (raw !== null && (typeof raw !== 'object' || Array.isArray(raw))) {
+        const error = frameworkError('会话状态结构无效，拒绝迁移旧记忆', 503);
+        error.code = 'MEMORY_MIGRATION_BACKUP_FAILED'; throw error;
+      }
+      archiveLegacyMemory(raw, path.join(STATE_DIR, 'legacy-memory'), atomicWriteJson);
       socialV2.paused = raw?.paused === true;
       if (raw && typeof raw.conversations === 'object') {
         const seenTokens = new Set();
@@ -8451,17 +8734,6 @@ async function main() {
             lastReadThroughSeq: Number.isSafeInteger(val.lastReadThroughSeq) && val.lastReadThroughSeq >= 0
               ? Math.min(val.lastReadThroughSeq, Number(val.lastUnreadSeq) || 0) : 0,
             modelSeenSeqs: new Set(),
-            activeTopics: Array.isArray(val.activeTopics) ? val.activeTopics : [],
-            pendingThoughts: Array.isArray(val.pendingThoughts) ? val.pendingThoughts : [],
-            memberImpressions: (() => {
-              const rawImp = (val.memberImpressions && typeof val.memberImpressions === 'object') ? val.memberImpressions : {};
-              const clean = {};
-              for (const [k, v] of Object.entries(rawImp)) {
-                if (['__proto__', 'constructor', 'prototype'].includes(k)) continue;
-                clean[k] = v;
-              }
-              return clean;
-            })()
           };
           // 旧状态/异常状态里的指定成员名单也统一归一化，防止“null”/非法值污染。
           if (st.wakeConfig?.triggers && typeof st.wakeConfig.triggers === 'object') {
@@ -8512,6 +8784,7 @@ async function main() {
         }
       }
     } catch (error) {
+      if (error?.code === 'MEMORY_MIGRATION_BACKUP_FAILED') throw error;
       log('读取 socialV2 状态失败:', error?.message ?? error);
     }
   }
@@ -8538,9 +8811,6 @@ async function main() {
           preSleepWaitAccumMs: st.preSleepWaitAccumMs || 0,
           lastUnreadSeq: st.lastUnreadSeq || 0,
           lastReadThroughSeq: st.lastReadThroughSeq || 0,
-          activeTopics: Array.isArray(st.activeTopics) ? st.activeTopics.slice(-50) : [],
-          pendingThoughts: Array.isArray(st.pendingThoughts) ? st.pendingThoughts.slice(-50) : [],
-          memberImpressions: st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {},
           seenForwardIds: Array.from(seenForwardIds.get(key) || []).slice(-1000)
         };
       }
@@ -8741,107 +9011,6 @@ async function main() {
     const burst = recent.filter((m) => m && !m.isSelf && Date.now() - Number(m.time || 0) < 15000).length;
     if (burst >= 3) return 12000;
     return defaultMs;
-  }
-
-  function formatMemoryV2(st) {
-    if (!st) return '';
-    const lines = [];
-    const topics = Array.isArray(st.activeTopics) ? st.activeTopics.filter((t) => t && t.text) : [];
-    if (topics.length) {
-      lines.push('【进行中的话题】');
-      for (const t of topics.slice(-10)) {
-        const ago = t.lastMentionAt ? Math.round((Date.now() - t.lastMentionAt) / 60000) : 0;
-        const stale = t.lastMentionAt && Date.now() - Number(t.lastMentionAt) > 2 * 60 * 60 * 1000 ? '（已搁置）' : '';
-        lines.push(`- ${t.text}${stale}（${ago > 0 ? ago + '分钟前' : '刚刚'}）${t.pendingQuestion ? `；待追问：${t.pendingQuestion}` : ''}`);
-      }
-    }
-    const thoughts = Array.isArray(st.pendingThoughts) ? st.pendingThoughts.filter((t) => t && t.text && (!t.expiresAt || Date.now() < t.expiresAt)) : [];
-    if (thoughts.length) {
-      lines.push('【你想说但还没说的】');
-      for (const t of thoughts.slice(-10)) {
-        lines.push(`- ${t.text}${t.motivation ? `（${t.motivation}）` : ''}`);
-      }
-    }
-    const impressions = st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {};
-    const names = Object.keys(impressions);
-    if (names.length) {
-      lines.push('【对群友的印象】');
-      for (const name of names.slice(-10)) {
-        const im = impressions[name] || {};
-        const traits = Array.isArray(im.traits) ? im.traits : [];
-        lines.push(`- ${name}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${Number(im.interactionCount) || 0} 次）`);
-      }
-    }
-    return lines.join('\n');
-  }
-
-  function appendMemoryV2(st, category, content, extra = {}) {
-    if (!st) return;
-    const text = redactKnownTokensOnly(String(content ?? '')).trim();
-    const cat = String(category || '').trim();
-    // 轻量清理：过期想法移除；超过 24h 未提起的话题移除（避免无限膨胀）。
-    if (Array.isArray(st.pendingThoughts)) {
-      st.pendingThoughts = st.pendingThoughts.filter((t) => t && (!t.expiresAt || Date.now() < Number(t.expiresAt)));
-    }
-    if (Array.isArray(st.activeTopics)) {
-      st.activeTopics = st.activeTopics.filter((t) => t && (!t.lastMentionAt || Date.now() - Number(t.lastMentionAt) < 24 * 60 * 60 * 1000));
-    }
-    if (cat === 'activeTopic' && text) {
-      if (!Array.isArray(st.activeTopics)) st.activeTopics = [];
-      const existing = st.activeTopics.find((t) => t && String(t.text || '') === text);
-      if (existing) {
-        existing.lastMentionAt = Date.now();
-        if (Array.isArray(extra.participants)) {
-          const set = new Set([...(existing.participants || []), ...extra.participants.map((p) => redactKnownTokensOnly(String(p)))]);
-          existing.participants = [...set].slice(0, 10);
-        }
-        if (extra.pendingQuestion) existing.pendingQuestion = truncateText(redactKnownTokensOnly(String(extra.pendingQuestion)), 200);
-      } else {
-        st.activeTopics.push({
-          text: truncateText(text, 200),
-          lastMentionAt: Date.now(),
-          participants: Array.isArray(extra.participants) ? extra.participants.map((p) => redactKnownTokensOnly(String(p))).slice(0, 10) : [],
-          pendingQuestion: redactKnownTokensOnly(String(extra.pendingQuestion || '')).slice(0, 200)
-        });
-      }
-      if (st.activeTopics.length > 20) st.activeTopics.splice(0, st.activeTopics.length - 20);
-    } else if (cat === 'pendingThought' && text) {
-      if (!Array.isArray(st.pendingThoughts)) st.pendingThoughts = [];
-      const existing = st.pendingThoughts.find((t) => t && String(t.text || '') === text);
-      if (existing) {
-        existing.createdAt = Date.now();
-        existing.expiresAt = Date.now() + (Number(extra.expiresAtMs) || 2 * 60 * 60 * 1000);
-        if (extra.motivation) existing.motivation = redactKnownTokensOnly(String(extra.motivation)).slice(0, 50);
-      } else {
-        st.pendingThoughts.push({
-          text: text.slice(0, 200),
-          createdAt: Date.now(),
-          expiresAt: Date.now() + (Number(extra.expiresAtMs) || 2 * 60 * 60 * 1000),
-          motivation: redactKnownTokensOnly(String(extra.motivation || 'curiosity')).slice(0, 50)
-        });
-      }
-      if (st.pendingThoughts.length > 20) st.pendingThoughts.splice(0, st.pendingThoughts.length - 20);
-    } else if (cat === 'memberImpression') {
-      const target = String(extra.target || '').trim();
-      if (!target || ['__proto__', 'constructor', 'prototype'].includes(target)) return;
-      if (!st.memberImpressions || typeof st.memberImpressions !== 'object') st.memberImpressions = {};
-      const old = st.memberImpressions[target] || {};
-      const traits = Array.isArray(old.traits) ? old.traits.slice(0, 10) : [];
-      if (text && !traits.includes(text.slice(0, 50))) traits.push(text.slice(0, 50));
-      st.memberImpressions[target] = {
-        traits,
-        interactionCount: (Number(old.interactionCount) || 0) + 1,
-        lastSeenAt: Date.now()
-      };
-      const impressionEntries = Object.entries(st.memberImpressions);
-      if (impressionEntries.length > 50) {
-        impressionEntries.sort((a, b) => (Number(a[1]?.lastSeenAt) || 0) - (Number(b[1]?.lastSeenAt) || 0));
-        for (let i = 0; i < impressionEntries.length - 50; i++) {
-          delete st.memberImpressions[impressionEntries[i][0]];
-        }
-      }
-    }
-    saveSocialV2State();
   }
 
   loadSocialV2State();
@@ -9747,7 +9916,7 @@ async function main() {
   }
 
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
-  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = []) {
+  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], contentPacket = null) {
     const st = getSocialV2State(key);
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
@@ -9797,6 +9966,7 @@ async function main() {
       ownerLabel: isOwner ? `管理员（ownerQQ ${cfg.ownerQQ ?? ''}）` : '',
       isSelf: false,
       media: safeMedia,
+      content: contentPacket?.content ?? [],
       hasMedia: safeMedia.length > 0,
       forwardIds: safeForwardIds,
       hasForward: safeForwardIds.length > 0,
@@ -9811,13 +9981,6 @@ async function main() {
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
     st.unread.push(msg);
     if (st.unread.length > unreadLimit) st.unread.splice(0, st.unread.length - unreadLimit);
-    const lowerPlain = String(plainContent ?? textContent ?? '');
-    for (const t of st.activeTopics || []) {
-      if (!t || typeof t !== 'object') continue;
-      const topicHit = String(t.text || '').length > 0 && lowerPlain.includes(String(t.text || '').slice(0, 10));
-      const participantHit = Array.isArray(t.participants) && t.participants.some((p) => p && lowerPlain.includes(String(p)));
-      if (topicHit || participantHit) t.lastMentionAt = Date.now();
-    }
     saveSocialV2State();
   }
 
@@ -10086,6 +10249,7 @@ async function main() {
 
   function buildWakeSnapshotV2(key) {
     const context = cfg.socialV2?.context ?? {};
+    if (context.strategy !== 'inline') return null;
     if (context.inlineWakeMessages === false || (!v2ToolEnabled('getUnread') && !v2ToolEnabled('getRecent'))) return null;
     const st = getSocialV2State(key);
     const bounded = (name, fallback, min, max) => {
@@ -10154,10 +10318,18 @@ async function main() {
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
-    const memoryText = formatMemoryV2(st);
-    const memoryLine = memoryText ? `${memoryText}\n\n` : '';
-    // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
-    // 避免唤醒 prompt 出现两份黑话表。
+    if (cfg.socialV2?.context?.strategy !== 'inline') {
+      const roleVersion = crypto.createHash('sha256').update(currentRoleHintV2()).digest('hex').slice(0, 16);
+      const initial = reason === 'bootstrap' ? formatInitialPromptV2(key) : '';
+      const reasonText = ({ bootstrap: '首次接入', timeout: '有限潜水时间已到', replyCheck: '回复检查', proactiveCheck: '主动机会', poke: '拍一拍' })[reason] ?? reason;
+      return `${roleLine}${identityLine}${tokenLine}${initial ? initial + '\n\n' : ''}`
+        + `${reason === 'bootstrap' ? '【引导唤醒】' : '【唤醒】'}${key}；原因：${reasonText}；未读 ${st.unread.length} 条；角色版本 ${roleVersion}。\n`
+        + '【按需上下文】先用 qq_get_unread_messages 读取新消息并保留 readThroughSeq；已有消息无需重复查。'
+        + '首次进入、角色版本变化或上下文压缩后缺失人设时，用 qq_get_prompt 获取人设和工具协议。'
+        + '确有需要才用 qq_context_query：memory 查询相关话题或 member 指定人物印象；slang 查询不懂的原词；history 查询相关旧消息。不要例行拉取全部资料。'
+        + '回复、等待与收尾遵循预设协议；只确认已处理的消息水位。';
+    }
+    const memoryLine = ''; // Memory content is obtained only through the provider interface.
     const participationText = formatParticipationV2(st);
     const participationLine = participationText ? `${participationText}\n\n` : '';
     const antiAiLine = '【反AI味】你不是客服：不用有求必应，可以装傻、已读乱回、拒绝推荐；少用“一绝/真管用/保证/绝对”这类词。\n\n';
@@ -10595,8 +10767,6 @@ async function main() {
       const idle = Date.now() - (st.lastIncomingAt || 0);
       const probBase = Number(p.probability);
       let prob = Math.min(1, Math.max(0, Number.isFinite(probBase) ? probBase : 0.4));
-      const pendingThoughts = Array.isArray(st.pendingThoughts) ? st.pendingThoughts.filter((t) => t && (!t.expiresAt || Date.now() < Number(t.expiresAt))).length : 0;
-      if (pendingThoughts > 0) prob = Math.min(1, prob * 1.4);
       if (st.lastAiReplyAt && Date.now() - Number(st.lastAiReplyAt) < 30 * 60 * 1000) prob *= 0.5;
       const hour = new Date().getHours();
       if (hour >= 23 || hour < 8) prob *= 0.3;
@@ -10683,6 +10853,7 @@ async function main() {
     const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
     const mediaList = extractMediaFromSegments(event.message ?? []);
     const messageRef = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '');
+    const contentPacket = normalizeIncomingContent(key, messageRef, event.message);
     const seqRef = event.message_seq != null ? String(event.message_seq) : '';
     const refsToStore = [...new Set([messageRef, seqRef].filter(Boolean))];
     if (refsToStore.length > 0 && mediaList.length > 0) {
@@ -10703,6 +10874,7 @@ async function main() {
     // 因此必须先解析 quoteTargetIsSelf 再做空文本过滤，避免“只引用不附文”被漏掉。
     const quoteTargetIsSelf = await isQuoteTargetSelf(event.message ?? [], kind, id, event.self_id);
     if (!isSessionAllowedInCurrentMode(key) || incomingPolicy !== sessionPolicy(key)) return;
+    if (contentPacket.sources.length) contentSources.register(key, contentPacket);
     if (!plainContent && !quoteTargetIsSelf) return;
     const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
     const roleState = readRoleState();
@@ -10824,7 +10996,7 @@ async function main() {
     // 二代仿真模式（reserved2）：唤醒调度
     if (modeFor(key) === 'reserved2') {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
-      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
+      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), contentPacket);
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
       if (kind === 'group') feedSlangWindow(key, sender, plainContent);
       if (socialV2.paused) {
@@ -10856,12 +11028,13 @@ async function main() {
 
     // 群聊里带发送者信息，私聊不用；角色提示注入到消息开头（agent 可见）；
     // 管理员消息带身份标记（供 agent 识别，但其权限仍受工具面硬限制）
+    const contentHint = contentPacket.sources.length ? `\n【内容引用】${JSON.stringify(contentPacket.content.filter(item => item.type !== 'text'))}\n需要理解内容时先用 qq_content_services 查看可用服务，再按需调用 qq_process_content；不要仅凭标题或链接假装看过视频。` : '';
     const promptText = (roleHint ? roleHint + '\n\n' : '')
       + (isOwner ? '【管理员】' : '')
       + (kind === 'group'
         ? `${event.sender?.card || event.sender?.nickname || String(event.user_id)}：${textContent}`
         : textContent)
-      + mediaHintFor(key, messageRef, mediaList);
+      + mediaHintFor(key, messageRef, mediaList) + contentHint;
 
     appendActivity(`${key} ${isOwner ? '管理员' : '群友'} ${event.sender?.nickname || event.user_id}：${textContent.slice(0, 80)}`);
 
@@ -10892,7 +11065,7 @@ async function main() {
         st.probeDeadline = 0;
         // 私聊：发给你就是叫你，直接即时投递，不等轮询、不参与沉默
         if (kind === 'private') {
-          const promptText = `${roleHint ? roleHint + '\n\n' : ''}${isOwner ? '【管理员】' : ''}${textContent}${mediaHintFor(key, messageRef, mediaList)}`;
+          const promptText = `${roleHint ? roleHint + '\n\n' : ''}${isOwner ? '【管理员】' : ''}${textContent}${mediaHintFor(key, messageRef, mediaList)}${contentHint}`;
           scheduleSocialReply(
             key, promptText,
             Number(cfg.social?.activeReplyDelayMinMs ?? 2000),
@@ -11868,15 +12041,17 @@ async function main() {
   await pumpMux();
 }
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   log('退出中…');
   saveState();
   releaseLock();
+  await Promise.race([closeContentServices(), sleep(1500)]);
   process.exit(0);
 });
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   saveState();
   releaseLock();
+  await Promise.race([closeContentServices(), sleep(1500)]);
   process.exit(0);
 });
 process.on('unhandledRejection', (error) => {

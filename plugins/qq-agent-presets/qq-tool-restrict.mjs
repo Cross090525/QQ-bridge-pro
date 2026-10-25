@@ -173,7 +173,13 @@ const SAFE_EXACT = new Set([
   'todo_write',
 ])
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
+  // External MCP calls must use the permission broker, not a static guard bypass.
+  const extraTools = config.allowedMcpTools ?? [];
+  const invalidDirectTools = !Array.isArray(extraTools) || extraTools.length > 0;
+  // Do not throw before installing the guard: a host may skip a failed plugin
+  // while still inheriting its global tools. Install an execution deny instead.
+  if (invalidDirectTools) console.error('[qq-tool-restrict] allowedMcpTools 已停用，工具调用将拒绝；请迁移到 framework.services 与会话权限规则');
   // 1) 把已知危险全局工具从 schema 隐藏（restrict 只影响继承的全局层，
   //    不会误删 preset 自己注册的 scoped 工具）。
   // 逐个 restrict：当前 DSH 版本不存在的工具名会单独抛错并跳过，
@@ -195,6 +201,7 @@ export function apply(ctx) {
 
   // 2) 执行期白名单：任何不在允许范围内的工具调用都会被拒绝。
   ctx.tools.guard((exec) => {
+    if (invalidDirectTools) return '额外 MCP 直连会绕过审批，已拒绝工具调用；请管理员迁移 allowedMcpTools 到框架服务并重启 DSH'
     const name = exec?.name
     if (typeof name !== 'string' || name.length === 0) return '工具名无效，已拒绝'
     if (SAFE_EXACT.has(name)) return

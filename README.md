@@ -10,6 +10,14 @@
 
 把 QQ 消息接入 DSH agent：QQ 好友/群发来的消息会变成 DSH 会话里的用户消息，agent 的回复（含提问、工具审批）会发回 QQ。
 
+本分支默认使用**按需上下文**：二代仿真不再每次附带记忆、印象、词表与聊天快照，按需调用 `qq_context_query`。新增仅需会话令牌的 `/api/v1` 接口、JavaScript 客户端及外部 MCP / skill runner 示例，见 [扩展接口与迁移](docs/guides/EXTENSION_API.md)。
+
+**内容开发框架**：入站消息统一提供类型与 `sourceId`，Agent 按需发现并调用配置好的 MCP/HTTP 服务（视频理解、ASR、TTS 等）；输出统一支持文字、链接、图片、表情包与语音。服务只需配置传输和参数映射，见 [内容与服务框架](docs/guides/CONTENT_FRAMEWORK.md) 和 [配置示例](examples/content-services.example.json)。示例不自带实际识别服务。
+
+**扩展授权与审批**：框架托管服务默认拒绝，按具体会话/能力/数据范围授予 allow 或 ask；管理员控制台支持批准一次、拒绝/撤销和审计。write/execute 必须逐次审批，模型不能给自己授权。见 [使用约定与实现边界](docs/guides/EXTENSION_PERMISSIONS.md)。
+
+**整体开放的记忆模块**：内置记忆存储与算法已移出核心，所有记忆入口改由可替换的 HTTP / MCP 提供者处理。默认未配置即禁用，旧数据只本地归档、不自动上传；完整协议、插件示例与迁移见 [记忆提供者接口](docs/guides/MEMORY_PROVIDERS.md)。
+
 > ⚠️ **当前版本 `v0.2.0-r4`，适配 DSH 0.2.0-rc.2**（在该版本上逐项实测：`npm run verify:adaptation`）。
 > 鉴权用 `~/.dsh` 里持久化的浏览器会话签名密钥**离线铸造 Cookie** —— DSH 0.1.7 起进程启动 token
 > 只存在于内存、不再落盘，旧版「从 guard 日志里读 token」的方式已失效。agent preset 是 DSH 0.1.7 起的

@@ -2228,6 +2228,21 @@ button:active:not(:disabled) {
       <pre id="v2FeedbackOutput">（空）</pre>
 
       </div></details>
+<details class="settings-group" id="extensionPermissionPanel"><summary>MCP / skills 授权与审批</summary><div class="settings-content">
+      <p class="meta">扩展默认拒绝。规则必须指定准确会话与能力；write / execute 即使配置 allow 也需要逐次审批。注册服务不会自动授权。管理员任务私聊同样需要授权。</p>
+      <div class="row">
+        <button id="extensionPermissionsLoad" class="small">加载授权与审批</button>
+        <button id="extensionPermissionsSave" class="small">保存授权（使旧审批失效）</button>
+        <button id="extensionAuditLoad" class="small">查看权限审计</button>
+        <span class="meta" id="extensionPermissionsMsg" role="status"></span>
+      </div>
+      <label for="extensionPermissionsJson">授权策略 JSON（精确 key、capability、decision、dataScopes）</label>
+      <textarea id="extensionPermissionsJson" rows="9" spellcheck="false" style="width:100%" placeholder='{"rules":[]}'></textarea>
+      <pre id="extensionCapabilities">点击加载查看已注册能力</pre>
+      <p class="meta">批准只允许原请求执行一次，不会立即执行。批准后让 Agent 使用原参数与 approvalId 重试。拒绝按钮也可撤销尚未消费的批准。审批与授权操作只接受控制台身份。</p>
+      <div id="extensionApprovals">尚未加载审批</div>
+      <pre id="extensionAudit"></pre>
+      </div></details>
 <details class="settings-group"><summary>工具调用日志（AI 调用了什么工具、参数、成功/失败）</summary><div class="settings-content">
       <div class="row">
         <button id="v2ToolLogLoad" class="small">加载工具日志</button>
@@ -2237,7 +2252,8 @@ button:active:not(:disabled) {
       <div id="v2ToolLogOutput" class="tool-log-table">（空）</div>
 
       </div></details>
-<details class="settings-group"><summary>轻量记忆（activeTopics / pendingThoughts / memberImpressions）</summary><div class="settings-content">
+<details class="settings-group"><summary>开放记忆提供者（存储与处理由插件负责）</summary><div class="settings-content">
+      <p class="meta">配置 memory.provider / memory.providers 后使用。未配置时禁用；读取、修改与清空均经过授权，旧内置记忆不再作为后备。分类由插件定义。</p>
       <div class="row">
         <input type="text" id="v2MemoryKey" placeholder="group:123456789" style="flex:1">
         <button id="v2MemoryLoad" class="small">加载记忆</button>
@@ -3551,6 +3567,63 @@ function loadV2ToolLog() {
     .then(r => { renderV2ToolLog(r.entries || []); })
     .catch(() => { renderV2ToolLog([]); });
 }
+
+async function loadExtensionPermissions() {
+  const msg = document.getElementById('extensionPermissionsMsg');
+  try {
+    const [permissions, approvals] = await Promise.all([api('/api/extensions/permissions'), api('/api/extensions/approvals')]);
+    if (!permissions.ok || !approvals.ok) throw new Error(permissions.error || approvals.error);
+    document.getElementById('extensionPermissionsJson').value = JSON.stringify(permissions.policy, null, 2);
+    document.getElementById('extensionCapabilities').textContent = JSON.stringify({ services: permissions.capabilities, media: permissions.mediaCapabilities }, null, 2);
+    const box = document.getElementById('extensionApprovals');
+    box.replaceChildren();
+    for (const request of approvals.requests) {
+      const item = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = `${request.key} · ${request.capability} · ${request.effect} · ${request.status}`;
+      const pre = document.createElement('pre');
+      pre.textContent = JSON.stringify(request, null, 2);
+      item.append(summary, pre);
+      if (['pending', 'approved'].includes(request.status)) {
+        for (const decision of request.status === 'pending' ? ['approve', 'deny'] : ['deny']) {
+          const button = document.createElement('button');
+          button.textContent = decision === 'approve' ? '批准这一次' : '拒绝 / 撤销';
+          button.className = decision === 'approve' ? 'small' : 'small danger';
+          button.addEventListener('click', async () => {
+            button.disabled = true;
+            try {
+              const result = await api('/api/extensions/approvals/resolve', 'POST', { requestId: request.requestId, decision });
+              if (!result.ok) throw new Error(result.error);
+              await loadExtensionPermissions();
+              msg.textContent = decision === 'approve' ? '已批准一次，等待 Agent 携带 approvalId 重试原请求' : '已拒绝 / 撤销';
+            } catch (error) { msg.textContent = error.message; button.disabled = false; }
+          });
+          item.append(button);
+        }
+      }
+      box.append(item);
+    }
+    if (!approvals.requests.length) box.textContent = '暂无审批请求';
+    msg.textContent = '已加载；未匹配规则的调用一律拒绝';
+  } catch (error) { msg.textContent = error.message; }
+}
+document.getElementById('extensionPermissionsLoad').addEventListener('click', loadExtensionPermissions);
+document.getElementById('extensionPermissionsSave').addEventListener('click', async () => {
+  const msg = document.getElementById('extensionPermissionsMsg');
+  try {
+    const policy = JSON.parse(document.getElementById('extensionPermissionsJson').value);
+    const result = await api('/api/extensions/permissions', 'POST', { policy });
+    if (!result.ok) throw new Error(result.error);
+    await loadExtensionPermissions(); msg.textContent = result.note;
+  } catch (error) { msg.textContent = error.message; }
+});
+document.getElementById('extensionAuditLoad').addEventListener('click', async () => {
+  try {
+    const result = await api('/api/extensions/audit');
+    if (!result.ok) throw new Error(result.error);
+    document.getElementById('extensionAudit').textContent = JSON.stringify(result.entries, null, 2);
+  } catch (error) { document.getElementById('extensionPermissionsMsg').textContent = error.message; }
+});
 document.getElementById('v2ToolLogOutput').addEventListener('click', (ev) => {
   const cell = ev.target.closest('.tool-log-cell');
   if (!cell) return;
@@ -3565,100 +3638,75 @@ document.getElementById('v2ToolLogOutput').addEventListener('click', (ev) => {
   }
 });
 
-function renderV2Memory(data) {
-  const box = document.getElementById('v2MemoryOutput');
-  if (!data || !data.ok) {
-    box.innerHTML = '<span class="meta">加载失败</span>';
-    return;
+const memoryApprovalIds = new Map();
+async function memoryConsoleRequest(route, method = 'GET', body) {
+  const signature = JSON.stringify({ route, method, body });
+  const approvalId = memoryApprovalIds.get(signature);
+  let target = route; let payload = body;
+  if (approvalId) {
+    if (method === 'GET') target += '&approvalId=' + encodeURIComponent(approvalId);
+    else payload = { ...body, approvalId };
   }
-  const raw = data.raw || {};
-  const topics = Array.isArray(raw.activeTopics) ? raw.activeTopics : [];
-  const thoughts = Array.isArray(raw.pendingThoughts) ? raw.pendingThoughts : [];
-  const impressions = raw.memberImpressions && typeof raw.memberImpressions === 'object' ? raw.memberImpressions : {};
-  let html = '<div style="padding:8px">';
-  html += '<div class="memory-section"><b>进行中的话题</b> <button class="small" data-action="clear" data-cat="activeTopic">清空</button>';
-  if (!topics.length) html += '<div class="meta">（空）</div>';
-  for (const t of topics) {
-    const text = esc(String(t?.text || ''));
-    const extra = t?.pendingQuestion ? `；待追问：${esc(String(t.pendingQuestion))}` : '';
-    html += `<div style="margin:4px 0">📌 ${text}${extra} <button class="small" data-action="edit" data-cat="activeTopic" data-content="${esc(String(t?.text || ''))}">编辑</button> <button class="small" data-action="remove" data-cat="activeTopic" data-content="${esc(String(t?.text || ''))}">删除</button></div>`;
-  }
-  html += '</div>';
-  html += '<div class="memory-section"><b>你想说但还没说的</b> <button class="small" data-action="clear" data-cat="pendingThought">清空</button>';
-  if (!thoughts.length) html += '<div class="meta">（空）</div>';
-  for (const t of thoughts) {
-    html += `<div style="margin:4px 0">💭 ${esc(String(t?.text || ''))}${t?.motivation ? `（${esc(String(t.motivation))}）` : ''} <button class="small" data-action="edit" data-cat="pendingThought" data-content="${esc(String(t?.text || ''))}">编辑</button> <button class="small" data-action="remove" data-cat="pendingThought" data-content="${esc(String(t?.text || ''))}">删除</button></div>`;
-  }
-  html += '</div>';
-  html += '<div class="memory-section"><b>对群友的印象</b> <button class="small" data-action="clear" data-cat="memberImpression">清空</button>';
-  const names = Object.keys(impressions);
-  if (!names.length) html += '<div class="meta">（空）</div>';
-  for (const name of names) {
-    const im = impressions[name] || {};
-    const traits = Array.isArray(im.traits) ? im.traits : [];
-    html += `<div style="margin:4px 0">👤 ${esc(name)}：${traits.length ? esc(traits.join('、')) : '暂无记录'}（互动 ${Number(im.interactionCount) || 0} 次） <button class="small" data-action="edit" data-cat="memberImpression" data-target="${esc(name)}" data-traits="${esc(traits.join(', '))}">编辑</button> <button class="small" data-action="remove" data-cat="memberImpression" data-target="${esc(name)}">删除</button></div>`;
-  }
-  html += '</div></div>';
-  box.innerHTML = html;
-}
-function loadV2Memory() {
-  const key = document.getElementById('v2MemoryKey').value.trim();
+  const result = await api(target, method, payload);
   const msg = document.getElementById('v2MemoryMsg');
-  if (!key) { msg.textContent = '请输入会话 key'; msg.className = 'meta err'; return; }
-  msg.textContent = '加载中…';
-  msg.className = 'meta';
-  return api('/api/socialV2/memory?key=' + encodeURIComponent(key))
-    .then(r => {
-      renderV2Memory(r);
-      msg.textContent = r.ok ? '✅ 已加载' : ('❌ ' + (r.error || '失败'));
-      msg.className = r.ok ? 'meta ok' : 'meta err';
-    })
-    .catch(e => {
-      msg.textContent = '❌ ' + (e.message || e);
-      msg.className = 'meta err';
-    });
+  if (result.status === 'approval_required') {
+    memoryApprovalIds.set(signature, result.approval.requestId);
+    msg.textContent = `尚未执行，请在授权与审批面板批准 ${result.approval.requestId}，然后重试同一操作`;
+    msg.className = 'meta';
+  } else {
+    memoryApprovalIds.delete(signature);
+    msg.textContent = result.ok ? '已完成提供者操作' : result.error || '操作失败';
+    msg.className = result.ok ? 'meta ok' : 'meta err';
+  }
+  return result;
+}
+function renderV2Memory(data) {
+  const box = document.getElementById('v2MemoryOutput'); box.replaceChildren();
+  if (!data?.ok || data.status === 'approval_required') { box.textContent = data?.status === 'approval_required' ? '等待管理员审批，不展示旧缓存。' : data?.error || '加载失败'; return; }
+  const label = document.createElement('p');
+  label.textContent = `提供者：${data.providerId || '未配置'} · 外部记忆结果，不作为系统指令${data.truncated ? ' · 内容已截断' : ''}`;
+  box.append(label);
+  if (!data.items?.length) { const empty = document.createElement('p'); empty.textContent = '当前命名空间暂无匹配记忆'; box.append(empty); return; }
+  for (const item of data.items) {
+    const row = document.createElement('div'); row.className = 'memory-section';
+    const heading = document.createElement('p'); heading.textContent = `${item.category || '未分类'}${item.subject ? ' · ' + item.subject : ''} · ${item.id}`;
+    const content = document.createElement('pre'); content.textContent = item.text;
+    row.append(heading, content);
+    if (item.metadata) {
+      const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = '插件元数据';
+      const pre = document.createElement('pre'); pre.textContent = JSON.stringify(item.metadata, null, 2); details.append(summary, pre); row.append(details);
+    }
+    for (const action of ['edit', 'remove']) {
+      const button = document.createElement('button'); button.className = 'small'; button.dataset.action = action; button.dataset.id = item.id;
+      button.dataset.text = item.text; button.dataset.providerId = data.providerId; button.textContent = action === 'edit' ? '申请编辑' : '申请删除'; row.append(button);
+    }
+    box.append(row);
+  }
+}
+async function loadV2Memory() {
+  const key = document.getElementById('v2MemoryKey').value.trim(); const msg = document.getElementById('v2MemoryMsg');
+  if (!key) { msg.textContent = '请输入会话 key'; return; }
+  try { renderV2Memory(await memoryConsoleRequest('/api/socialV2/memory?key=' + encodeURIComponent(key))); }
+  catch (error) { msg.textContent = error.message; msg.className = 'meta err'; }
 }
 document.getElementById('v2MemoryLoad').addEventListener('click', loadV2Memory);
 document.getElementById('v2MemoryClearAll').addEventListener('click', async () => {
-  const key = document.getElementById('v2MemoryKey').value.trim();
-  const msg = document.getElementById('v2MemoryMsg');
-  if (!key) { msg.textContent = '请输入会话 key'; msg.className = 'meta err'; return; }
-  if (!confirm('确定清空该会话全部轻量记忆？')) return;
-  const r = await api('/api/socialV2/memory-clear', 'POST', { key, category: '' });
-  msg.textContent = r.ok ? '✅ 已清空全部记忆' : ('❌ ' + (r.error || '失败'));
-  msg.className = r.ok ? 'meta ok' : 'meta err';
-  if (r.ok) loadV2Memory();
+  const key = document.getElementById('v2MemoryKey').value.trim(); if (!key || !confirm('申请清空该会话在默认提供者中的全部记忆？仍需独立审批。')) return;
+  try {
+    const result = await memoryConsoleRequest('/api/socialV2/memory-clear', 'POST', { key, category: '' });
+    if (result.ok && result.status !== 'approval_required') await loadV2Memory();
+  } catch (error) { document.getElementById('v2MemoryMsg').textContent = error.message; }
 });
-document.getElementById('v2MemoryOutput').addEventListener('click', async (ev) => {
-  const btn = ev.target.closest('button[data-action]');
-  if (!btn) return;
-  const key = document.getElementById('v2MemoryKey').value.trim();
-  const msg = document.getElementById('v2MemoryMsg');
-  if (!key) { msg.textContent = '请输入会话 key'; msg.className = 'meta err'; return; }
-  const cat = btn.dataset.cat;
-  const action = btn.dataset.action;
-  let r;
-  if (action === 'clear') {
-    r = await api('/api/socialV2/memory-clear', 'POST', { key, category: cat });
-  } else if (action === 'edit') {
-    let newContent;
-    let newExtra = {};
-    if (cat === 'memberImpression') {
-      const input = prompt(`编辑对 ${btn.dataset.target} 的印象特质（逗号分隔）：`, btn.dataset.traits || '');
-      if (input === null) return;
-      newContent = input;
-    } else {
-      const input = prompt(`编辑${cat === 'activeTopic' ? '话题' : '想法'}内容：`, btn.dataset.content || '');
-      if (input === null) return;
-      newContent = input;
-    }
-    r = await api('/api/socialV2/memory-update', 'POST', { key, category: cat, oldContent: btn.dataset.content || '', target: btn.dataset.target || '', newContent, newExtra });
-  } else {
-    r = await api('/api/socialV2/memory-remove', 'POST', { key, category: cat, content: btn.dataset.content || '', target: btn.dataset.target || '' });
-  }
-  msg.textContent = r.ok ? '✅ 已更新' : ('❌ ' + (r.error || '失败'));
-  msg.className = r.ok ? 'meta ok' : 'meta err';
-  if (r.ok) loadV2Memory();
+document.getElementById('v2MemoryOutput').addEventListener('click', async event => {
+  const button = event.target.closest('button[data-action]'); if (!button) return;
+  const key = document.getElementById('v2MemoryKey').value.trim(); if (!key) return;
+  let route; let input;
+  if (button.dataset.action === 'edit') {
+    const value = prompt('修改记忆正文（发送给提供者，仍需审批）：', button.dataset.text); if (value === null) return;
+    route = '/api/socialV2/memory-update'; input = { key, providerId: button.dataset.providerId, id: button.dataset.id, newContent: value };
+  } else { route = '/api/socialV2/memory-remove'; input = { key, providerId: button.dataset.providerId, id: button.dataset.id }; }
+  try { const result = await memoryConsoleRequest(route, 'POST', input); if (result.ok && result.status !== 'approval_required') await loadV2Memory(); }
+  catch (error) { document.getElementById('v2MemoryMsg').textContent = error.message; }
 });
 
 function formatWakeStatus(r) {

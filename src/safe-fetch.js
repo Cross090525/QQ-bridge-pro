@@ -383,3 +383,20 @@ export async function safeFetchBuffer(urlString, maxBytes = 8 * 1024 * 1024) {
   }
   throw new Error('重定向次数过多，已停止');
 }
+
+/** Bounded binary media download with the same DNS/IP/redirect checks as images. */
+export async function safeFetchBytes(urlString, maxBytes = 8 * 1024 * 1024) {
+  validateLimit(maxBytes, 'maxBytes');
+  let { url, addresses } = await validateFetchUrl(urlString);
+  for (let i = 0; i <= 5; i++) {
+    const result = await requestOnce(url, addresses, maxBytes, true);
+    if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
+      if (!result.redirect) throw new Error('重定向缺少 Location');
+      ({ url, addresses } = await validateFetchUrl(new URL(result.redirect, url).toString()));
+      continue;
+    }
+    if (result.statusCode < 200 || result.statusCode >= 300) throw new Error(`媒体抓取失败：HTTP ${result.statusCode}`);
+    return { url: url.toString(), buffer: result.buffer };
+  }
+  throw new Error('重定向次数过多');
+}

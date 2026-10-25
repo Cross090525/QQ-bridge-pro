@@ -344,6 +344,14 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
   const file = htmlPath || resolve(projectRoot, original ? 'scripts/fixtures/console.before.html' : 'public/console.html');
   await readFile(file); // Fail early rather than displaying a broken preview.
   const state = makeFixtureState();
+  // Synthetic extension decisions only. No real permission broker or services.
+  state.extensionPolicy = { rules: [] };
+  state.memoryRecords = [{ id: 'memory-example', text: '周末的阅读计划', category: 'custom-topic', subject: '演示群友' }];
+  state.memoryClearApproval = null;
+  state.extensionApprovals = [{ requestId: 'c'.repeat(32), key: 'group:123456789', capability: 'video.inspect', effect: 'read',
+    status: 'pending', createdAt: Date.now(), expiresAt: Date.now() + 300000,
+    destination: '离线测试 MCP', input: { note: '<img src=x onerror="window.injected=true">' },
+    source: { sourceId: 'a'.repeat(32), messageId: '42', url: 'https://b23.tv/fixture' } }];
   const requests = [];
   const unknownRequests = [];
   const server = http.createServer(async (req, res) => {
@@ -450,11 +458,14 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
           case '/api/sessions': return json({ sessions: state.sessions });
           case '/api/pending': return json({ pending: [{ key: 'group:123456789', kind: 'approval', toolName: '演示工具', reason: '等待管理员确认（离线示例）' }] });
           case '/api/social': return json({ config: state.social, states: state.socialStates, pendingSummaries: { 'group:123456789': 2 } });
+          case '/api/extensions/permissions': return json({ ok: true, policy: state.extensionPolicy, capabilities: [{ id: 'video.inspect', effect: 'read' }], mediaCapabilities: ['bridge.media.read', 'bridge.media.upload'] });
+          case '/api/extensions/approvals': return json({ ok: true, requests: state.extensionApprovals });
+          case '/api/extensions/audit': return json({ ok: true, entries: [{ event: 'requested', capability: 'video.inspect' }] });
           case '/api/socialV2/config': return json({ ok: true, config: state.v2 });
           case '/api/socialV2/activity': return json({ ok: true, paused: state.paused });
           case '/api/socialV2/tool-log': return json({ ok: true, entries: state.toolLog });
           case '/api/socialV2/feedback': return json({ ok: true, entries: state.feedback });
-          case '/api/socialV2/memory': return json({ ok: true, raw: { activeTopics: [{ text: '周末的阅读计划', pendingQuestion: '有没有推荐的书？' }], pendingThoughts: [{ text: '分享一张风景照片', motivation: '轻松交流' }], memberImpressions: { 演示群友: { traits: ['友善', '喜欢技术'], interactionCount: 6 } } } });
+          case '/api/socialV2/memory': return json({ ok: true, providerId: 'example', items: state.memoryRecords, nextCursor: null, untrusted: true });
           case '/api/socialV2/state': return json({ ok: true, key: url.searchParams.get('key'), wakeConfig: { mode: 'diving', infinite: false, sleepUntil: '2026-09-20T09:00:00.000Z', triggers: { atMention: true, keywords: ['小鲸鱼'] }, wakeCount: 4 }, wakeSafety: { guaranteed: true }, unreadCount: 2, lastWakeReason: 'atMention' });
           case '/api/socialV2/states': return json({ ok: true, conversations: state.sessions.map(x => ({ key: x.key, phase: 'diving', unreadCount: 2 })) });
           case '/api/socialV2/initial-prompt': {
@@ -589,9 +600,29 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             else state.slang.forEach(x => { if (ids.includes(x.id)) x.status = path.endsWith('confirm') ? 'confirmed' : 'rejected'; });
             return json({ ok: true, count: ids.length, confirmed: ids.length, rejected: ids.length, deleted: ids.length });
           }
+          case '/api/extensions/permissions':
+            state.extensionPolicy = body.policy;
+            return json({ ok: true, policy: body.policy, note: '策略已生效，旧审批已失效' });
+          case '/api/extensions/approvals/resolve': {
+            const request = state.extensionApprovals.find(item => item.requestId === body.requestId);
+            if (!request || !['approve', 'deny'].includes(body.decision)) return json({ ok: false, error: '无效审批' }, 400);
+            request.status = body.decision === 'approve' ? 'approved' : 'denied';
+            return json({ ok: true, approval: request });
+          }
           case '/api/social/flush':
-          case '/api/socialV2/wake':
-          case '/api/socialV2/memory-clear':
+          case '/api/socialV2/wake': return json({ ok: true });
+          case '/api/socialV2/memory-clear': {
+            if (!state.memoryClearApproval) {
+              state.memoryClearApproval = { requestId: 'd'.repeat(32), key: body.key, capability: 'memory.example.clear', effect: 'write',
+                status: 'pending', input: { category: body.category }, createdAt: Date.now(), expiresAt: Date.now() + 300000 };
+              state.extensionApprovals.push(state.memoryClearApproval);
+            }
+            const approval = state.memoryClearApproval;
+            if (approval.status === 'pending' || !body.approvalId) return json({ ok: true, status: 'approval_required', approval }, 202);
+            if (approval.status !== 'approved' || approval.requestId !== body.approvalId) return json({ ok: false, error: '审批已失效' }, 403);
+            approval.status = 'consumed'; state.memoryRecords = [];
+            return json({ ok: true, providerId: 'example', operation: 'clear', affectedIds: ['memory-example'] });
+          }
           case '/api/socialV2/memory-update':
           case '/api/socialV2/memory-remove': return json({ ok: true });
           case '/api/tokens/reset': return json({ ok: true });
