@@ -9,6 +9,8 @@
 
 ## guides/ —— 面向使用者 / 运维
 
+当前开放框架的分层总览、按需上下文、管理员QQ审批、媒体取证、外部记忆和部署架构见 [FRAMEWORK_ARCHITECTURE.md](guides/FRAMEWORK_ARCHITECTURE.md)。
+
 按需上下文、API v1、JavaScript 客户端和外部 MCP / skill runner 接入见 [EXTENSION_API.md](guides/EXTENSION_API.md)。
 
 消息类型、媒体句柄、按需 MCP/HTTP 服务分发与统一输出见 [CONTENT_FRAMEWORK.md](guides/CONTENT_FRAMEWORK.md)。
