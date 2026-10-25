@@ -66,6 +66,8 @@
     "test:dual": "node scripts/test-dual-mode.mjs && node --test src/core/session-router.test.mjs",
     "test:context": "node --test scripts/test-context-api.mjs",
     "test:framework": "node --test scripts/test-content-framework.mjs",
+    "test:media": "node --test scripts/test-media-services.mjs",
+    "setup:media": "node scripts/setup-media-services.mjs",
     "test:permissions": "node --test scripts/test-extension-permissions.mjs",
     "test:permissions:ui": "node scripts/test-extension-permissions-ui.mjs",
     "test:memory": "node --test scripts/test-memory-providers.mjs",
@@ -83,6 +85,7 @@
     "@snowluma/mcp": "^1.14.20",
     "@snowluma/sdk": "^1.14.20",
     "js-yaml": "^4.3.2",
+    "pngjs": "7.0.0",
     "zod": "^4.4.3"
   }
 }
