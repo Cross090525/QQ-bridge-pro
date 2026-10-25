@@ -17,6 +17,8 @@
 
 内置记忆整体替换为开放提供者，HTTP/MCP 协议、数据归档与迁移见 [MEMORY_PROVIDERS.md](guides/MEMORY_PROVIDERS.md)。
 
+管理员授权的限时争论辅助、自动发送、受限事件接口及 DSH 插件运行方式见 [DEBATE_PLUGIN.md](guides/DEBATE_PLUGIN.md)。
+
 | 文档 | 一句话说明 | 状态 |
 | --- | --- | --- |
 | [guides/PROJECT_GUIDE.md](guides/PROJECT_GUIDE.md) | **权威项目说明书**（113 KB / 1450+ 行）：架构、内外核划分、数据流、配置全解、安全机制、调试与改进指南，含 2026-08-20 ~ 2026-09-11 的逐轮更新记录 | ✅ **唯一权威版本**（另一份同名精简版已归档到 legacy，见下） |

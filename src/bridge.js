@@ -16,6 +16,7 @@ import { ContentServiceRuntime } from './framework/services.mjs';
 import { ExtensionPermissions, normalizePermissionPolicy, permissionDigest } from './framework/permissions.mjs';
 import { MemoryProviderRuntime } from './framework/memory-providers.mjs';
 import { archiveLegacyMemory, legacyMemoryOperation } from './framework/memory-compat.mjs';
+import { DebateTasks, handleDebateApi } from './framework/debate.mjs';
 let closeContentServices = async () => {};
 import os from 'node:os';
 import http from 'node:http';
@@ -1436,6 +1437,23 @@ async function main() {
   } });
   const contentServices = new ContentServiceRuntime({ services: cfg.framework?.services ?? [], permissions: extensionPermissions,
     mediaStore: frameworkMedia, readSource: readFrameworkSource });
+  const debateTasks = new DebateTasks({
+    assertGroup: (key, policy) => {
+      if (!key.startsWith('group:') || !isSessionAllowedInCurrentMode(key) || modeFor(key) !== 'reserved2'
+          || socialV2.paused || cfg.socialV2?.enabled === false || shouldBlockSilentReply(key)
+          || (policy !== undefined && policy !== sessionPolicy(key))) throw frameworkError('该群未授权、已暂停或模式已变化', 403);
+      return sessionPolicy(key);
+    },
+    audit: entry => extensionPermissions.record(entry),
+    send: (key, message, assertLive) => requestContext.run({ assertLive }, async () => {
+      assertLive();
+      if (SENSITIVE_RE.test(message) || [...KNOWN_AGENT_TOKENS].some(token => token && message.includes(token))) throw frameworkError('草稿疑似包含敏感信息，已拒绝发送', 403);
+      // No debate-specific delay or frequency quota. Preserve the common queue
+      // and its execution-time guards; approvals authorize the exact draft only.
+      await sendMessagesV2(key, splitForQQ(message), [], null);
+      recordSentMessagesV2(key, [message]);
+    }),
+  });
   let memoryNamespaceSalt = '';
   if (cfg.memory?.providers?.length) {
     const namespaceFile = path.join(STATE_DIR, 'memory-namespace.json');
@@ -3479,9 +3497,10 @@ async function main() {
       }
       // Public extension routes use ONLY a live conversation token. Never give
       // an external MCP/skill the console credential or an arbitrary API proxy.
-      const publicApi = url.pathname.startsWith('/api/v1/')
+      const debatePublic = url.pathname.startsWith('/api/v1/debate/');
+      const publicApi = url.pathname.startsWith('/api/v1/') && !debatePublic
         ? resolvePublicApiRoute(req.method, url.pathname) : null;
-      const isPublicApi = url.pathname.startsWith('/api/v1/');
+      const isPublicApi = url.pathname.startsWith('/api/v1/') && !debatePublic;
       if (isPublicApi) {
         if (!publicApi) { sendJson({ ok: false, error: '未知的 v1 接口或请求方法' }, 404); return; }
         const token = req.headers['x-agent-token'];
@@ -3512,7 +3531,7 @@ async function main() {
         if (a.length !== b.length) return false;
         return crypto.timingSafeEqual(a, b);
       })();
-      if (consoleToken && !tokenMatches && !isPublicApi) {
+      if (consoleToken && !tokenMatches && !isPublicApi && !debatePublic) {
         if (req.method === 'GET' && url.pathname === '/') {
           res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
           res.end('<!doctype html><meta charset="utf-8"><title>需要令牌</title><script>const t=prompt(\'请输入控制台访问令牌\');if(t)location.href=\'/?token=\'+encodeURIComponent(t);</script>');
@@ -3583,6 +3602,11 @@ async function main() {
         }
       }
       try {
+        if (debatePublic || url.pathname.startsWith('/api/debate/')) {
+          await handleDebateApi({ req, res, url, readBody, sendJson, tasks: debateTasks,
+            admin: tokenMatches && req.headers['x-agent-token'] === undefined && req.headers['x-agent-call'] === undefined && req.headers['x-debate-token'] === undefined });
+          return;
+        }
         // These endpoints are management-only, even if an agent also supplies a
         // valid console credential. They are never aliases in the public API.
         if (url.pathname.startsWith('/api/extensions/')) {
@@ -3800,10 +3824,11 @@ async function main() {
             return;
           }
         }
-        if (req.method === 'GET' && url.pathname === '/') {
+        if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/debate')) {
+          if (url.pathname === '/debate' && (req.headers['x-agent-token'] !== undefined || req.headers['x-agent-call'] !== undefined)) throw frameworkError('争论管理页仅供管理员使用', 403);
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
           try {
-            res.end(fs.readFileSync(path.join(ROOT, 'public', 'console.html'), 'utf8'));
+            res.end(fs.readFileSync(path.join(ROOT, 'public', url.pathname === '/debate' ? 'debate.html' : 'console.html'), 'utf8'));
           } catch {
             res.end('控制台页面缺失：qq-bridge/public/console.html');
           }
@@ -9916,7 +9941,7 @@ async function main() {
   }
 
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
-  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], contentPacket = null) {
+  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], contentPacket = null, replyToMessageId = null) {
     const st = getSocialV2State(key);
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
@@ -9978,10 +10003,12 @@ async function main() {
     st.preSleepWaitObservedAt = 0;
     st.preSleepWaitAccumMs = 0;
     st.recentMessages.push(msg);
+    const debateHandled = debateTasks.ingest(key, { ...msg, plain: String(plainContent ?? textContent).slice(0, 2000), replyToMessageId });
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
     st.unread.push(msg);
     if (st.unread.length > unreadLimit) st.unread.splice(0, st.unread.length - unreadLimit);
     saveSocialV2State();
+    return debateHandled;
   }
 
   // 二代拍一拍事件写入最近/未读消息流，让 AI 能看到“谁拍了拍谁/拍了拍我”。
@@ -10996,7 +11023,12 @@ async function main() {
     // 二代仿真模式（reserved2）：唤醒调度
     if (modeFor(key) === 'reserved2') {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
-      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), contentPacket);
+      const debateHandled = appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), contentPacket,
+        Array.isArray(event.message) ? event.message.find(segment => segment?.type === 'reply')?.data?.id : null);
+      if (debateHandled) {
+        appendActivity(`${key} [debate] 相关消息已交给限时争论任务，本条不触发普通聊天唤醒`);
+        return;
+      }
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
       if (kind === 'group') feedSlangWindow(key, sender, plainContent);
       if (socialV2.paused) {

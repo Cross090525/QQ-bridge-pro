@@ -31,6 +31,7 @@ import { ContentServiceRuntime } from '../src/framework/services.mjs';
 import * as extensionPermissionsModule from '../src/framework/permissions.mjs';
 import { MemoryProviderRuntime } from '../src/framework/memory-providers.mjs';
 import * as memoryCompat from '../src/framework/memory-compat.mjs';
+import { DebateTasks, handleDebateApi } from '../src/framework/debate.mjs';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -134,7 +135,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     buildWakePromptV2, buildWakeSnapshotV2, sendWakePromptV2, socialV2,
     refreshMode, modeAllowed, modeFor, ownerAgentToken, ownerAgentTokens, sessionPolicy, reconcileSessionPolicies, trackTurnEvent, replayPendingWakeReasonsV2,
     collectors, setupSleepTimerV2,
-    contentSources, contentServices, frameworkMedia, frameworkScope, extensionPermissions, memoryProviders,
+    contentSources, contentServices, frameworkMedia, frameworkScope, extensionPermissions, memoryProviders, debateTasks,
     getInitialPrompt, setInitialPrompt, loadInitialPrompts, formatInitialPromptV2,
     initialPrompts, initialPromptMaxChars,
     extractMediaFromSegments, segmentsToText, fetchOneBotImage, fetchMediaData, resolveMediaList,
@@ -176,7 +177,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...dualMode, ...contextQuery, ...publicApi,
-    ...frameworkContent, FrameworkMediaStore, ContentServiceRuntime, ...extensionPermissionsModule, MemoryProviderRuntime, ...memoryCompat,
+    ...frameworkContent, FrameworkMediaStore, ContentServiceRuntime, ...extensionPermissionsModule, MemoryProviderRuntime, ...memoryCompat, DebateTasks, handleDebateApi,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),
