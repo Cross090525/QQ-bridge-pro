@@ -6,6 +6,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib';
 import { SENSITIVE_RE } from '../src/sensitive.js';
 
 const lookupCalls = [];
@@ -65,6 +66,27 @@ function mockTransport(t, scripts) {
   t.mock.method(https, 'request', request);
   return { requests, responses };
 }
+
+test('text fetch decodes compressed UTF-8 with limits on decompressed text', async (t) => {
+  const text = '<html>这是分享视频的页面</html>';
+  const scenarios = [['gzip', gzipSync], ['deflate', deflateSync], ['br', brotliCompressSync]];
+  const transport = mockTransport(t, scenarios.flatMap(([encoding, encode]) => [
+    { headers: { 'content-encoding': encoding }, body: encode(text) },
+    { headers: { 'content-encoding': encoding }, body: encode('好'.repeat(100000)) },
+  ]));
+  for (const _ of scenarios) {
+    assert.equal((await safeFetch('http://93.184.216.34/')).body, text);
+    const limited = await safeFetch('http://93.184.216.34/', 7);
+    assert.equal(limited.body, '好'.repeat(7)); assert.equal(limited.truncated, true);
+  }
+  assert.equal(transport.requests[0].options.headers['accept-encoding'], 'identity');
+});
+
+test('text fetch rejects damaged and unsupported compression without returning binary garbage', async (t) => {
+  mockTransport(t, [{ headers: { 'content-encoding': 'gzip' }, body: 'broken' }, { headers: { 'content-encoding': 'unknown' }, body: 'bad' }]);
+  await assert.rejects(safeFetch('http://93.184.216.34/'), /解压/);
+  await assert.rejects(safeFetch('http://93.184.216.34/'), /压缩格式/);
+});
 
 test('sensitive audit catches UNC paths and quoted JSON credentials', () => {
   for (const value of [

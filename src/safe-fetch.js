@@ -10,6 +10,7 @@ import net from 'node:net';
 import http from 'node:http';
 import https from 'node:https';
 import { StringDecoder } from 'node:string_decoder';
+import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
 
 const dnsLookup = dns.promises.lookup;
 
@@ -225,6 +226,7 @@ function attemptOnce(url, address, limit, binary, budgetMs) {
           'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36',
           accept: binary ? 'image/*,*/*;q=0.8' : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'accept-language': 'zh-CN,zh;q=0.9',
+          'accept-encoding': 'identity',
         },
         servername: url.protocol === 'https:' && !net.isIP(hostname) ? hostname : undefined,
         rejectUnauthorized: url.protocol === 'https:',
@@ -245,6 +247,15 @@ function attemptOnce(url, address, limit, binary, budgetMs) {
           return;
         }
         const chunks = [];
+        const encoding = String(res.headers['content-encoding'] || 'identity').toLowerCase().trim();
+        const decompress = binary || encoding === 'identity' ? null
+          : encoding === 'gzip' ? createGunzip() : encoding === 'deflate' ? createInflate() : encoding === 'br' ? createBrotliDecompress() : undefined;
+        if (decompress === undefined) { fail(new Error('不支持的网页压缩格式'), false); res.destroy(); return; }
+        const body = decompress ? res.pipe(decompress) : res;
+        if (decompress) {
+          decompress.on('error', () => { fail(new Error('网页解压失败'), false); res.destroy(); });
+          res.on('close', () => { if (!res.complete || settled) decompress.destroy(); });
+        }
         const decoder = binary ? null : new StringDecoder('utf8');
         let size = 0;
         const appendText = (text) => {
@@ -255,9 +266,10 @@ function attemptOnce(url, address, limit, binary, budgetMs) {
           if (size >= limit) {
             done({ statusCode, body: chunks.join(''), truncated: true });
             res.destroy();
+            decompress?.destroy();
           }
         };
-        res.on('data', (chunk) => {
+        body.on('data', (chunk) => {
           if (settled) return;
           if (!binary) { appendText(decoder.write(chunk)); return; }
           size += chunk.length;
@@ -268,7 +280,7 @@ function attemptOnce(url, address, limit, binary, budgetMs) {
           }
           chunks.push(chunk);
         });
-        res.on('end', () => {
+        body.on('end', () => {
           if (settled) return;
           if (binary) done({ statusCode, buffer: Buffer.concat(chunks) });
           else {
