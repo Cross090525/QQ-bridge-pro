@@ -1473,15 +1473,26 @@ async function main() {
   async function readFrameworkSource(source) {
     let url = source.url;
     let localFile = '';
-    if (!url && source.type === 'voice' && source.file && !/[\\/]|\.\.|:/.test(source.file)) {
+    let buffer;
+    // A voice URL usually contains QQ SILK, not decoded audio. Ask the trusted
+    // gateway to convert even when that URL exists. Its base64 result crosses
+    // the Docker boundary without granting access to account/cache directories.
+    if (source.type === 'voice' && source.file && !/[\\/]|\.\.|:/.test(source.file)) {
       const result = await bot.raw('get_record', { file: source.file, out_format: 'wav' });
       const info = result?.data ?? result;
+      if (info?.base64 !== undefined) {
+        const encoded = typeof info.base64 === 'string' ? info.base64.replace(/^base64:\/\//, '') : '';
+        if (!encoded || encoded.length > Math.ceil(8 * 1024 * 1024 / 3) * 4
+            || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 !== 0) throw frameworkError('网关语音字节无效或超过 8MB', 413);
+        buffer = Buffer.from(encoded, 'base64');
+        if (!buffer.length || buffer.length > 8 * 1024 * 1024 || buffer.toString('base64') !== encoded) throw frameworkError('网关语音字节无效或超过 8MB', 413);
+        if (buffer.toString('ascii', 0, 4) !== 'RIFF' || buffer.toString('ascii', 8, 12) !== 'WAVE') throw frameworkError('网关未返回请求的 WAV 音频', 422);
+      }
       url = info?.url;
       localFile = info?.file || '';
     }
-    let buffer;
-    if (url) buffer = (await safeFetchBytes(url, 8 * 1024 * 1024)).buffer;
-    else {
+    if (!buffer && url) buffer = (await safeFetchBytes(url, 8 * 1024 * 1024)).buffer;
+    else if (!buffer) {
       const candidate = localFile || source.file;
       const roots = (Array.isArray(cfg.framework?.mediaRoots) ? cfg.framework.mediaRoots : []).filter(Boolean);
       if (!candidate || !path.isAbsolute(candidate)) throw frameworkError('网关未提供可下载的媒体；请配置媒体根目录或提供 URL', 422);

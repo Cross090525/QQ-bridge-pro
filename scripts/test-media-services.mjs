@@ -150,14 +150,19 @@ test('services remain default-deny, and approval is checked before reading sourc
   } finally { await runtime.close(); }
 });
 
-test('actual framework API invokes real stdio/FFmpeg, returns scoped media handles and forbids cross-group use', { skip: !installed }, () => fixtures(async ({ gif, directory }) => {
+test('actual framework API invokes real stdio/FFmpeg/SenseVoice for scoped frames and gateway voice bytes', { skip: !installed }, () => fixtures(async ({ gif, wav, directory }) => {
   const services = buildMediaServices();
-  const rules = [{ key: 'group:456', capability: 'media.frames', decision: 'allow', dataScopes: ['source-bytes', 'input'], maxInputChars: 8000 }];
+  const rules = ['media.frames', 'media.transcript'].map(capability => ({ key: 'group:456', capability, decision: 'allow', dataScopes: ['source-bytes', 'input'], maxInputChars: 8000 }));
   const h = await bridgeHarness({ config: { ownerQQ: 123, dualMode: { enabled: true, ownerPreset: 'standard' },
     allow: { groups: ['456', '789'], private: ['123'] }, framework: { services, permissions: { rules }, mediaRoots: [directory] } } });
   const local = path.join(directory, 'received.gif'); await fs.writeFile(local, gif);
   await h.ensureSession('group:456'); await h.ensureSession('group:789');
   h.contentSources.register('group:456', { sources: [{ type: 'sticker', sourceId: 'a'.repeat(32), messageId: '42', file: local }] });
+  h.contentSources.register('group:456', { sources: [{ type: 'voice', sourceId: 'b'.repeat(32), messageId: '43', file: 'received.amr', url: 'https://never-download.invalid/silk' }] });
+  h.bot.raw = async (action, args) => {
+    assert.equal(action, 'get_record'); assert.equal(args.out_format, 'wav');
+    return { base64: wav.toString('base64'), file: '/container-only/audio.wav' };
+  };
   const server = h.startConsoleServer(); if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   const a = new QQBridgeClient({ baseUrl, key: 'group:456', token: h.getSocialV2State('group:456').agentToken });
@@ -169,5 +174,9 @@ test('actual framework API invokes real stdio/FFmpeg, returns scoped media handl
     assert.ok(result.media.every(media => /^[a-f0-9]{32}$/.test(media.mediaId)));
     await assert.rejects(b.processContent('media.frames', { sourceId: 'a'.repeat(32) }), /会话|引用/);
     assert.ok(!JSON.stringify(result).includes('private-job'));
+    const voice = await a.processContent('media.transcript', { sourceId: 'b'.repeat(32), input: { durationSeconds: 1 } });
+    assert.deepEqual(voice.evidence, ['metadata', 'transcript', 'audio']);
+    assert.equal(JSON.parse(voice.content[0].text).endSeconds, 1);
+    await assert.rejects(b.processContent('media.transcript', { sourceId: 'b'.repeat(32) }), /会话|引用/);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await h.close(); }
 }));

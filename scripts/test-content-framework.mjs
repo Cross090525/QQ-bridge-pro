@@ -104,6 +104,43 @@ test('configured HTTP recognizer receives voice bytes only after an explicit Age
   finally { provider.closeAllConnections(); await new Promise(resolve => provider.close(resolve)); }
 });
 
+test('gateway WAV bytes cross Docker boundary even when incoming voice has a SILK URL', async () => {
+  const wav = Buffer.alloc(46); wav.write('RIFF'); wav.writeUInt32LE(38, 4); wav.write('WAVEfmt ', 8);
+  wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(16000, 24);
+  wav.writeUInt32LE(32000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(2, 40);
+  let processed = 0;
+  const provider = http.createServer((req, res) => {
+    let raw = ''; req.on('data', chunk => { raw += chunk; }); req.on('end', () => {
+      const input = JSON.parse(raw); assert.equal(input.source.data, wav.toString('base64'));
+      assert.equal(input.source.mimeType, 'audio/wav'); assert.equal(input.source.file, undefined); processed++;
+      res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ content: [{ type: 'text', text: '识别结果' }], evidence: ['transcript'] }));
+    });
+  });
+  await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+  try { await fixture(async ({ h, receive, client }) => {
+    let conversion = 0; let base64 = wav.toString('base64');
+    h.bot.raw = async (action, args) => {
+      assert.equal(action, 'get_record'); assert.equal(args.file, 'received.amr'); assert.equal(args.out_format, 'wav'); conversion++;
+      return { data: { base64, url: 'https://must-not-download.invalid/raw.silk', file: '/container/private/audio.wav' } };
+    };
+    const packet = await receive([{ type: 'record', data: { file: 'received.amr', url: 'https://must-not-download.invalid/raw.silk' } }]);
+    const sourceId = packet.sources[0].sourceId;
+    assert.equal(conversion, 0);
+    h.extensionPermissions.replacePolicy({ rules: [{ key: KEY, capability: 'voice.transcribe', decision: 'ask', dataScopes: ['source-bytes', 'input'] }] });
+    assert.equal((await client.processContent('voice.transcribe', { sourceId })).status, 'approval_required'); assert.equal(conversion, 0);
+    h.extensionPermissions.replacePolicy({ rules: [{ key: KEY, capability: 'voice.transcribe', decision: 'allow', dataScopes: ['source-bytes', 'input'] }] });
+    const result = await client.processContent('voice.transcribe', { sourceId });
+    assert.equal(result.content[0].text, '识别结果'); assert.equal(conversion, 1); assert.equal(processed, 1);
+    for (const invalid of ['@@@=', Buffer.from('not-wave').toString('base64'), 'A'.repeat(Math.ceil(8 * 1024 * 1024 / 3) * 4 + 4)]) {
+      base64 = invalid;
+      await assert.rejects(client.processContent('voice.transcribe', { sourceId, input: { request: String(conversion) } }), /字节无效|WAV/);
+    }
+    assert.equal(processed, 1);
+  }, { framework: { services: [{ id: 'voice.transcribe', accepts: ['voice'], inputMode: 'bytes',
+    transport: { type: 'http', url: `http://127.0.0.1:${provider.address().port}` } }] } }); }
+  finally { provider.closeAllConnections(); await new Promise(resolve => provider.close(resolve)); }
+});
+
 test('TTS service results become session-bound audio handles that can be sent as QQ voice', () => fixture(async ({ h, client }) => {
   const result = await client.processContent('voice.synthesize', { input: { text: '周末见' } });
   assert.equal(result.media[0].type, 'voice');
