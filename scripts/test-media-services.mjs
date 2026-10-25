@@ -43,6 +43,7 @@ test('media inputs reject arbitrary paths, invalid URLs, malformed bytes and unb
   assert.throws(() => frameTimes(10, { maxFrames: 7 }), /1–6/);
   assert.throws(() => frameTimes(10, { timestamps: '2,NaN' }), /范围/);
   assert.throws(() => frameTimes(10, { timestamps: '10' }), /范围/);
+  assert.deepEqual(frameTimes(10, { maxFrames: 4 }), [0, 2.5, 5, 7.5]);
 });
 
 test('native media subprocesses stop on timeout and oversized output', async () => {
@@ -65,11 +66,13 @@ test('B站 transport pins checked addresses, strips CDN cookies and rejects fore
 
 test('B站 text-first extraction disables frames/vision and declares no picture evidence', async () => {
   let options;
-  const provider = new BridgeMediaProvider({ extractAll: async value => { options = value; return { success: true, video: { title: '测试', duration: 20 }, transcript: { source: 'subtitle', text: '字幕只描述了一部分画面' } }; } });
+  const provider = new BridgeMediaProvider({ extractAll: async value => { options = value; return { success: true, metadata: { title: '测试', duration: 20, uploader: { name: '作者' } }, transcript: { source: 'subtitle', text: '字幕只描述了一部分画面' } }; } });
   const result = await provider.call('bilibili_transcript', { source: { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, input: { asr: false } });
   assert.equal(options.extractFrames, false); assert.equal(options.visionProvider, 'none'); assert.equal(options.asrProvider, 'none');
   assert.deepEqual(result.evidence, ['metadata', 'transcript']);
   assert.match(result.content[0].text, /未读取画面/);
+  assert.equal(JSON.parse(result.content[0].text).title, '测试');
+  assert.equal(JSON.parse(result.content[0].text).uploader, '作者');
   await assert.rejects(fs.access(options.framesDir));
   await assert.rejects(provider.call('bilibili_transcript', { source: {}, input: { command: 'pwsh' } }), /未声明参数/);
 });

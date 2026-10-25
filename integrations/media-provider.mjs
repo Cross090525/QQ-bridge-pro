@@ -84,8 +84,9 @@ export class BridgeMediaProvider {
         if (JSON.stringify([...timeline, item]).length > 4000) break;
         timeline.push(item);
       }
-      const value = { bvid, title: String(result.video?.title || '').slice(0, 300), duration: result.video?.duration,
-        uploader: String(result.video?.uploader?.name || '').slice(0, 200), description: String(result.video?.description || '').slice(0, 500),
+      const metadata = result.metadata || result.video || {};
+      const value = { bvid, title: String(metadata.title || '').slice(0, 300), duration: metadata.duration,
+        uploader: String(metadata.uploader?.name || '').slice(0, 200), description: String(metadata.description || '').slice(0, 500),
         transcript: { source: transcript.source || 'none', text, timeline, timelineTruncated: timeline.length < (transcript.segments || []).length, truncated: String(transcript.text || '').length > text.length,
           note: String(transcript.note || '').slice(0, 400) },
         note: text ? '仅取得字幕或语音转写，未读取画面。需要画面时另调用 bilibili.frames。' : '未取得字幕或转写；仅有视频元信息，不能声称看过视频内容。' };

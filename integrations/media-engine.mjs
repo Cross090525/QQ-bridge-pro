@@ -65,7 +65,9 @@ export function frameTimes(duration, input = {}, lastFrameTime = Math.max(0, dur
     return [...new Set(times.map(time => Math.min(time, lastFrameTime)))].sort((a, b) => a - b);
   }
   if (duration <= 0.2) return [0];
-  return [...new Set(Array.from({ length: count }, (_, i) => Math.floor(lastFrameTime * i / Math.max(1, count - 1) * 1000) / 1000))];
+  // Container duration may include audio/padding after the last decodable video
+  // frame. Default samples cover the timeline without seeking to that tail.
+  return [...new Set(Array.from({ length: count }, (_, i) => Math.floor(Math.min(lastFrameTime, duration * i / count) * 1000) / 1000))];
 }
 export class LocalMediaEngine {
   constructor({ ffmpeg, ffprobe, temporaryRoot = os.tmpdir(), asrModule, asrModel } = {}) {
