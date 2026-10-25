@@ -31,6 +31,32 @@ npm run test:media
 
 ## 调用示例
 
+### 分段分析与按时间继续取证
+
+四个现有服务、会话 sourceId 和权限机制保持一致。Agent 通过服务发现读取新参数，再选择是否继续处理；管理员不需要为每一段额外注册工具。
+
+- 转写默认识别0–120秒，内部按30秒分段；`segmentSeconds` 可设5–60秒，单次总区间最多180秒。返回 `segments`（B站为 `transcript.timeline`）、实际覆盖起止时间和 `nextInput`。时间戳是片段边界，不是逐字对齐。中途失败返回 `status=partial`（B站为 `audio.status`），保留已完成片段、禁止缓存，并从未完成位置继续。首次片段失败则明确失败。
+- `sampling=scene` 在指定区间以每秒2帧、64×36像素比较颜色直方图变化，按时间分箱选择切换附近画面，其余位置均匀补齐。默认扫描前120秒，单次最多180秒；`sceneTimes` 是视觉变化候选，不是语义场景保证，闪光、相似颜色和快速动作可能误判或漏检。返回 `sampledTimes` 和 `coverage.sampledOnly=true`，不能声称完整观看。
+- `startSeconds/durationSeconds` 指定分析区间；`timestamps` 是绝对秒数，优先用于精查，例如查看510秒附近的 `508,510,512`。指定区间时，时间点必须落在区间内。B站带时间戳的字幕也按区间筛选；相交字幕边界可能超出请求范围。没有时间索引且禁用ASR时，不把整篇字幕冒充该片段。
+- 用同一 `sourceId`、同一服务和返回的 `nextInput` 继续，返回 `null` 表示到达结尾；没有覆盖信息也可能返回null，不能单凭null断言完整处理。围绕争议观点或动作，分别读取对应音轨和前后帧。需要全片分析才逐段继续，普通消息不自动全量识别。
+- 长文本会在框架16000字符限制内有界返回，并标记 `textTruncated/timelineTruncated`；遇到截断应缩小区间重新取证。画面扫描有界，不改变B站下载体积限制；当前继续取证仍可能重新下载媒体，尚未加入跨调用原始媒体缓存。
+
+```js
+const first = await client.processContent('bilibili.transcript', {
+  sourceId, input: { startSeconds: 0, durationSeconds: 120, segmentSeconds: 30 }
+});
+const evidence = JSON.parse(first.content[0].text);
+if (evidence.nextInput) {
+  await client.processContent('bilibili.transcript', { sourceId, input: evidence.nextInput });
+}
+await client.processContent('bilibili.frames', {
+  sourceId, input: { sampling: 'scene', startSeconds: 480, durationSeconds: 120, maxFrames: 6 }
+});
+await client.processContent('bilibili.frames', {
+  sourceId, input: { timestamps: '508,510,512', maxFrames: 3 }
+});
+```
+
 ```js
 await client.contentServices(sourceId);
 await client.processContent('bilibili.transcript', { sourceId, input: { asr: false } });
