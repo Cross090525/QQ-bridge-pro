@@ -144,7 +144,7 @@ export class ContentServiceRuntime {
       const result = await promise;
       checkPermit();
       permit.finish('completed');
-      if (['read', 'generate'].includes(service.effect) && service.cache !== false && !result.media.length && JSON.stringify(result).length <= 20000) {
+      if (['read', 'generate'].includes(service.effect) && service.cache !== false && result.cacheable !== false && !result.media.length && JSON.stringify(result).length <= 20000) {
         this.cache.set(signature, { value: result, expiresAt: Date.now() + 300000 });
         while (this.cache.size > 64) this.cache.delete(this.cache.keys().next().value);
       }
@@ -197,7 +197,7 @@ export class ContentServiceRuntime {
       } else throw frameworkError('服务只支持 text / image / audio 结果', 502);
     }
     const evidence = Array.isArray(raw.evidence) ? raw.evidence.filter(item => ['metadata', 'transcript', 'frames', 'audio', 'video'].includes(item)) : [];
-    return { serviceId: service.id, sourceId: source?.sourceId ?? null, content, media, evidence,
+    return { serviceId: service.id, sourceId: source?.sourceId ?? null, content, media, evidence, ...(raw.cacheable === false ? { cacheable: false } : {}),
       note: evidence.length ? '按实际返回的证据评价；字幕/关键帧不代表看过整段视频。' : '服务未声明证据范围，只能依据实际返回内容作答。', cached: false };
   }
   async close() {

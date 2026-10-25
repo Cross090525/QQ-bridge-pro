@@ -52,37 +52,43 @@ export class BridgeMediaProvider {
     if (!address) throw Error('视频没有受支持的官方CDN直链');
     return address;
   }
-  async localTranscript(bvid) {
+  async localTranscript(bvid, input = {}) {
     const info = await this.json(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`);
     if (!Number.isSafeInteger(info.cid) || !Number.isFinite(info.duration) || info.duration <= 0 || info.duration > 1800) throw Error('视频时长超限');
     const play = await this.json(`https://api.bilibili.com/x/player/playurl?bvid=${bvid}&cid=${info.cid}&qn=16&fnval=16&fnver=0&fourk=0`);
-    const audio = play.dash?.audio?.[0];
+    const tracks = play.dash?.audio || [];
+    const audio = [...tracks].filter(track => Number.isFinite(track.bandwidth) && track.bandwidth > 0)
+      .sort((a, b) => a.bandwidth - b.bandwidth)[0] || tracks[0];
     if (!audio) throw Error('没有可用音轨');
     const address = this.mediaAddress([audio.baseUrl, audio.base_url, ...(audio.backupUrl || audio.backup_url || [])]);
     const response = await this.fetch(address, {}, { maxBytes: 16 * 1024 * 1024, timeoutMs: 60000 });
     if (!response.ok) throw Error('音轨下载失败');
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length > 16 * 1024 * 1024) throw Error('音轨过大');
-    const result = await this.engine.transcript(bytes, { durationSeconds: 120 });
+    const result = await this.engine.transcript(bytes, { startSeconds: input.startSeconds ?? 0, durationSeconds: input.durationSeconds ?? 120 });
     const transcript = JSON.parse(result.content[0].text);
     return { source: 'sensevoice-local', text: transcript.text, segments: [{ start: transcript.startSeconds, end: transcript.endSeconds, text: transcript.text }],
+      coverage: { startSeconds: transcript.startSeconds, endSeconds: transcript.endSeconds, totalDuration: transcript.totalDuration, partial: transcript.truncated },
       note: `本机转写 ${transcript.startSeconds}–${transcript.endSeconds} 秒，总时长 ${transcript.totalDuration} 秒；${transcript.truncated ? '仅覆盖部分音轨' : '已覆盖音轨'}，可能有识别错误。` };
   }
   async transcript(source, input = {}) {
     const bvid = await this.bvid(source);
     if (input.asr !== undefined && typeof input.asr !== 'boolean') throw Error('asr 必须为布尔值');
+    if (!Number.isFinite(input.startSeconds ?? 0) || (input.startSeconds ?? 0) < 0
+        || !Number.isFinite(input.durationSeconds ?? 120) || (input.durationSeconds ?? 120) < 1 || (input.durationSeconds ?? 120) > 180) throw Error('本机转写时间范围无效，单次最多180秒');
     const extractAll = this.extractAll || (await import(pathToFileURL(path.join(this.upstream, 'lib/extractor.js')).href)).extractAll;
     // A private job directory avoids sharing account-dependent transcript caches
     // between conversations. Nothing is written inside the upstream checkout.
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-bili-text-'));
     try {
       const result = await extractAll({ url: bvid, extractFrames: false, commentLimit: 5, framesDir: directory,
-        asrProvider: input.asr === false ? 'none' : 'bcut', sessdata: this.sessdata, visionProvider: 'none', signal: AbortSignal.timeout(70000) });
+        asrProvider: 'none', sessdata: this.sessdata, visionProvider: 'none', signal: AbortSignal.timeout(70000) });
       if (!result.success) throw Error('B站视频文字提取失败，请检查链接、网络或登录状态');
       let transcript = result.transcript || {};
+      let audio = { status: 'not_requested' };
       if (!transcript.text && input.asr !== false) {
-        try { transcript = await this.localTranscript(bvid); }
-        catch { transcript = { ...transcript, note: String(transcript.note || '') + '；本机音轨转写也未取得可用结果。' }; }
+        try { transcript = await this.localTranscript(bvid, input); audio = { status: 'processed', ...transcript.coverage }; }
+        catch { audio = { status: 'failed' }; transcript = { ...transcript, note: '未取得字幕，本机音轨转写失败；这不表示原视频没有声音。' }; }
       }
       const text = String(transcript.text || '').slice(0, 8000);
       const timeline = [];
@@ -94,10 +100,11 @@ export class BridgeMediaProvider {
       const metadata = result.metadata || result.video || {};
       const value = { bvid, title: String(metadata.title || '').slice(0, 300), duration: metadata.duration,
         uploader: String(metadata.uploader?.name || '').slice(0, 200), description: String(metadata.description || '').slice(0, 500),
-        transcript: { source: transcript.source || 'none', text, timeline, timelineTruncated: timeline.length < (transcript.segments || []).length, truncated: String(transcript.text || '').length > text.length,
+        audio, transcript: { source: transcript.source || 'none', text, timeline, timelineTruncated: timeline.length < (transcript.segments || []).length, truncated: String(transcript.text || '').length > text.length,
           note: String(transcript.note || '').slice(0, 400) },
         note: text ? '仅取得字幕或语音转写，未读取画面。需要画面时另调用 bilibili.frames。' : '未取得字幕或转写；仅有视频元信息，不能声称看过视频内容。' };
-      return { content: [{ type: 'text', text: JSON.stringify(value) }], evidence: ['metadata', ...(text ? ['transcript'] : [])] };
+      return { content: [{ type: 'text', text: JSON.stringify(value) }], evidence: ['metadata', ...(text ? ['transcript'] : []), ...(audio.status === 'processed' ? ['audio'] : [])],
+        ...(audio.status === 'failed' ? { cacheable: false } : {}) };
     } finally {
       if (path.dirname(directory) === path.resolve(os.tmpdir()) && path.basename(directory).startsWith('qq-bili-text-')) await fs.rm(directory, { recursive: true, force: true });
     }
@@ -131,11 +138,20 @@ export class BridgeMediaProvider {
     if (!response.ok) throw Error('B站视频下载失败');
     const buffer = Buffer.from(await response.arrayBuffer());
     if (buffer.length > maxBytes) throw Object.assign(mediaError('MEDIA_DOWNLOAD_LIMIT', '视频下载超过体积上限'), { limitMiB: maxBytes / 1048576 });
-    return this.engine.frames(buffer, input);
+    const result = await this.engine.frames(buffer, input);
+    if (result.content[0]?.type === 'text') {
+      const metadata = JSON.parse(result.content[0].text);
+      metadata.downloadedTrackHasAudio = metadata.hasAudio;
+      delete metadata.hasAudio;
+      metadata.audio = { status: 'not_requested', nextService: 'bilibili.transcript' };
+      metadata.note = String(metadata.note || '') + ' 本工具没有读取或识别原视频音轨，纯视频轨没有音频不代表原视频静音；要理解声音，另调用 bilibili.transcript(asr=true)。';
+      result.content[0].text = JSON.stringify(metadata);
+    }
+    return result;
   }
   async call(tool, { source, input = {} } = {}) {
     if (!input || Array.isArray(input) || typeof input !== 'object') throw Error('input 无效');
-    const allowed = tool === 'bilibili_transcript' ? ['asr'] : tool === 'media_transcript' ? ['startSeconds', 'durationSeconds'] : ['timestamps', 'maxFrames'];
+    const allowed = tool === 'bilibili_transcript' ? ['asr', 'startSeconds', 'durationSeconds'] : tool === 'media_transcript' ? ['startSeconds', 'durationSeconds'] : ['timestamps', 'maxFrames'];
     if (Object.keys(input).some(key => !allowed.includes(key))) throw Error('不允许自定义路径、命令或未声明参数');
     if (tool === 'bilibili_transcript') return this.transcript(source, input);
     if (tool === 'bilibili_frames') return this.frames(source, input);

@@ -97,8 +97,43 @@ test('B站 missing subtitles use bounded local audio fallback and disclose parti
   const value = JSON.parse(result.content[0].text);
   assert.equal(value.transcript.source, 'sensevoice-local'); assert.match(value.transcript.note, /仅覆盖部分音轨/);
   assert.equal(value.transcript.timeline[0].end, 120); assert.equal(calls, 1);
+  assert.equal(value.audio.status, 'processed'); assert.ok(result.evidence.includes('audio'));
   const disabled = await provider.call('bilibili_transcript', { source, input: { asr: false } });
   assert.deepEqual(disabled.evidence, ['metadata']); assert.equal(calls, 1);
+  assert.equal(JSON.parse(disabled.content[0].text).audio.status, 'not_requested');
+});
+
+test('Bilibili audio selects the smallest track and passes explicit recognition windows', async () => {
+  const provider = new BridgeMediaProvider({ extractAll: async options => {
+    assert.equal(options.asrProvider, 'none'); return { success: true, metadata: { duration: 1494 }, transcript: {} };
+  }, engine: { transcript: async (_bytes, input) => {
+    assert.deepEqual(input, { startSeconds: 500, durationSeconds: 30 });
+    return { content: [{ type: 'text', text: JSON.stringify({ text: '片段识别', startSeconds: 500, endSeconds: 530, totalDuration: 1494, truncated: true }) }] };
+  } }, fetchImpl: async url => {
+    if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 42, duration: 1494 } });
+    if (url.includes('/playurl?')) return Response.json({ code: 0, data: { dash: { audio: [
+      { bandwidth: 219805, baseUrl: 'https://cdn.bilivideo.com/large' },
+      { bandwidth: 65559, baseUrl: 'https://cdn.bilivideo.com/small' },
+    ] } } });
+    assert.equal(url, 'https://cdn.bilivideo.com/small'); return new Response('audio');
+  } });
+  const result = await provider.call('bilibili_transcript', { source: { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, input: { startSeconds: 500, durationSeconds: 30 } });
+  const value = JSON.parse(result.content[0].text);
+  assert.equal(value.audio.startSeconds, 500); assert.equal(value.audio.endSeconds, 530); assert.equal(value.audio.partial, true);
+  await assert.rejects(provider.call('bilibili_transcript', { source: { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, input: { durationSeconds: 181 } }), /时间范围/);
+});
+
+test('failed Bilibili audio recognition is distinct from silence and cannot be cached as success', async () => {
+  const provider = new BridgeMediaProvider({ extractAll: async () => ({ success: true, metadata: { title: '测试' }, transcript: {} }) });
+  provider.localTranscript = async () => { throw Error('private signed URL'); };
+  const result = await provider.call('bilibili_transcript', { source: { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' } });
+  const value = JSON.parse(result.content[0].text);
+  assert.equal(value.audio.status, 'failed'); assert.match(value.transcript.note, /不表示原视频没有声音/);
+  assert.equal(result.cacheable, false); assert.ok(!JSON.stringify(result).includes('private'));
+  const permissions = new ExtensionPermissions({ policy: { rules: [{ key: 'group:456', capability: 'audio.test', decision: 'allow', dataScopes: ['source-reference'] }] } });
+  const runtime = new ContentServiceRuntime({ permissions, services: [{ id: 'audio.test', effect: 'read', accepts: ['link'], transport: { type: 'http', url: 'http://127.0.0.1:9871/test' } }], fetchImpl: async () => Response.json(result) });
+  try { await runtime.call({ key: 'group:456', scope: 'test', serviceId: 'audio.test', source: { type: 'link', sourceId: 'a'.repeat(32), url: 'https://example.com' } }); assert.equal(runtime.cache.size, 0); }
+  finally { await runtime.close(); }
 });
 
 test('B站 frame mode downloads bounded public media before decoding, never hands URLs to FFmpeg', async () => {
@@ -117,7 +152,7 @@ test('B站 frame mode downloads bounded public media before decoding, never hand
 
 test('long Bilibili videos choose the smallest H.264 video-only track and skip PCDN ports', async () => {
   let download = 0; let decoded = 0;
-  const provider = new BridgeMediaProvider({ engine: { frames: async bytes => { assert.equal(bytes.toString(), 'video-only'); decoded++; return { content: [] }; } },
+  const provider = new BridgeMediaProvider({ engine: { frames: async bytes => { assert.equal(bytes.toString(), 'video-only'); decoded++; return { content: [{ type: 'text', text: JSON.stringify({ hasAudio: false }) }] }; } },
     fetchImpl: async (url, _options, limits) => {
       if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 42, duration: 1494 } });
       if (url.includes('fnval=1&')) return Response.json({ code: 0, data: { durl: [{ url: 'https://cdn.bilivideo.com/muxed', size: 97320214 }] } });
@@ -130,7 +165,10 @@ test('long Bilibili videos choose the smallest H.264 video-only track and skip P
       download++; return new Response('video-only');
     }
   });
-  await provider.frames({ type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, { maxFrames: 3 });
+  const result = await provider.frames({ type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, { maxFrames: 3 });
+  const metadata = JSON.parse(result.content[0].text);
+  assert.equal(metadata.hasAudio, undefined); assert.equal(metadata.audio.status, 'not_requested');
+  assert.equal(metadata.audio.nextService, 'bilibili.transcript'); assert.match(metadata.note, /不代表原视频静音/);
   assert.equal(download, 1); assert.equal(decoded, 1);
 });
 
