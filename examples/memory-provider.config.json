@@ -1,0 +1,16 @@
+{
+  "memory": {
+    "provider": "example",
+    "providers": [
+      {
+        "id": "example",
+        "description": "外部记忆提供者示例；生产环境可替换存储与检索",
+        "version": "1",
+        "operations": ["query", "write", "update", "delete", "clear", "ingest"],
+        "transport": { "type": "http", "url": "http://127.0.0.1:9873/memory" },
+        "timeoutMs": 30000
+      }
+    ]
+  },
+  "framework": { "permissions": { "rules": [] } }
+}

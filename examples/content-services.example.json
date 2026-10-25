@@ -1,0 +1,48 @@
+{
+  "framework": {
+    "permissions": { "rules": [] },
+    "mediaRoots": [],
+    "services": [
+      {
+        "id": "bilibili.inspect",
+        "effect": "read",
+        "description": "读取 B 站视频的字幕与关键帧；仅按实际证据评价",
+        "accepts": ["link"],
+        "hosts": ["bilibili.com", "b23.tv"],
+        "timeoutMs": 120000,
+        "transport": {
+          "type": "stdio",
+          "command": "node",
+          "args": ["C:/your-services/bili-mcp.mjs"]
+        },
+        "tool": "bili_video_digest",
+        "arguments": { "url": "$source.url", "frames": 4 }
+      },
+      {
+        "id": "voice.transcribe",
+        "effect": "read",
+        "description": "把收到的语音转成文字",
+        "accepts": ["voice"],
+        "inputMode": "bytes",
+        "transport": { "type": "http", "url": "http://127.0.0.1:9871/transcribe" }
+      },
+      {
+        "id": "voice.synthesize",
+        "effect": "generate",
+        "inputSchema": {
+          "properties": { "text": { "type": "string", "maxLength": 1000 }, "voice": { "type": "string", "maxLength": 40 } },
+          "required": ["text"]
+        },
+        "description": "把 input.text 合成为语音，返回 audio 内容块",
+        "inputHint": "input.text 为本次要说的话，可选 input.voice 为提供者支持的音色",
+        "accepts": ["text"],
+        "cache": false,
+        "transport": { "type": "http", "url": "http://127.0.0.1:9872/synthesize" }
+      }
+    ]
+  },
+  "socialV2": {
+    "tools": { "contentServices": true, "contentSend": true, "sendVoice": true },
+    "voice": { "enabled": true }
+  }
+}
