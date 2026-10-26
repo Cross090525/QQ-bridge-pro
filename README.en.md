@@ -92,7 +92,7 @@ DSH integration uses persistent local signing material for Cookie authentication
 
 ## Requirements
 
-- Node.js >= 22.13
+- Node.js: prefer 24.x LTS (`24.22.1` or later); if using 22.x, use at least `22.23.4`; if using 26.x, use at least `26.12.1` (Current). Use the listed minimum or a later patch release within the same major line, then verify with `node --version`. See the [Node.js security baseline](docs/guides/SECURITY_BASELINE.md).
 - Running DeepSeek Harness Web (default `http://127.0.0.1:3080`)
 - Running SnowLuma with OneBot v11 WebSocket and HTTP API enabled
 

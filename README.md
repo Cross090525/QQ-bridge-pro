@@ -122,7 +122,7 @@ DSH使用本机持久化签名密钥建立Cookie鉴权、斜杠RPC和事件流�
 
 1. 运行中的 DeepSeek Harness Web（默认 `http://127.0.0.1:3080`）
 2. 运行中的 SnowLuma，且配置好 OneBot WebSocket 与 HTTP API（默认 `ws://127.0.0.1:3001` / `http://127.0.0.1:3000`，`accessToken` 视配置填写）
-3. Node.js ≥ 22.13
+3. Node.js：建议使用 24.x LTS（至少 `24.22.1`）；如使用 22.x，至少 `22.23.4`；如使用 26.x，至少 `26.12.1`（Current）。每条主版本线都应使用对应最低修补版本或更新的补丁版本；安装后用 `node --version` 核对。详见 [Node.js 安全基线](docs/guides/SECURITY_BASELINE.md)。
 
 ## 安装与配置
 
@@ -201,7 +201,7 @@ node scripts/setup-dsh.mjs
    跳过这步桥接不会崩，但群聊会话拿不到 `qq-chat` preset，桥接会**拒绝建会话**（有意的安全设计：绝不回退到带 bash/文件工具的默认 preset），表现同样是 QQ 上没反应。
 
 4. **下载并解压 SnowLuma**
-   - 下载：<https://github.com/SnowLuma/SnowLuma/releases/latest> 选 `SnowLuma-v<版本>-win-x64.zip`（完整版，自带 Node 运行时；Lite 版需本机 Node 22.13+）
+   - 下载：<https://github.com/SnowLuma/SnowLuma/releases/latest> 选 `SnowLuma-v<版本>-win-x64.zip`（完整版自带 Node 运行时，Lite 版需本机 Node.js 22.x，至少使用 `22.23.4` 或更新的 22.x 补丁版；两种运行时均须符合 [Node.js 安全基线](docs/guides/SECURITY_BASELINE.md)）
    - 解压到任意目录（例如 `C:\SnowLuma`），双击 `launcher.bat`
 
 5. **首次引导（WebUI）+ 填写桥接配置**

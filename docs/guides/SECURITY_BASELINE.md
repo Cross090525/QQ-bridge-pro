@@ -139,6 +139,33 @@ DSH 的 Windows 文件沙箱按**能力 SID** 授权：SID 由 `sha256(规范化
 - 响应体大小与图片像素上限；图片按 magic number 校验
 - 不读取任何代理环境变量（不存在 `HTTP_PROXY` 绕过）
 
+### 8. Node.js 运行时版本
+
+本项目代码兼容要求仍为 Node.js `>=22.13.0`，但这只是代码兼容下限。针对 Node.js 官方 2026-10-21 安全公告列出的问题，安装时应使用包含这批修复的版本。公告列出多项 High 级问题，包括 Brotli 解码器越界写入（CVE-2026-111497，攻击者可控的 Brotli 输入可能导致崩溃、内存泄露或远程代码执行）、DNS 名称 NUL 截断（CVE-2026-105482）以及非规范 IPv4 写法引起的 TLS 校验问题（CVE-2026-106069 / CVE-2026-106072）。
+
+按主版本线安装以下版本或更高的同一主版本线补丁版本：
+
+| 主版本线 | 安全最低版本 | 状态 |
+| --- | --- | --- |
+| 22.x | `22.23.4` | LTS（Jod） |
+| 24.x | `24.22.1` | LTS（Krypton） |
+| 26.x | `26.12.1` | Current |
+
+表中版本是 2026-10-21 公告对应的最低修补版本；如果安装时所选主版本线已有更新的安全补丁，应安装更新版本。生产环境优先使用仍受支持的 LTS 版本。
+
+不要把 `22.13.0` 或任何 EOL 版本当作安全安装目标。Node.js 官方说明 EOL 版本不会继续获得漏洞修复；无法升级的旧版本应视为部署风险，而不是满足本项目的安全基线。
+
+安装后，在实际运行 bridge 的同一环境中核验版本：
+
+```bash
+node --version
+npm --version
+```
+
+若使用 systemd、Docker 或 SnowLuma 自带运行时，还要核对服务的 `ExecStart`、容器镜像或启动脚本实际调用的 Node 路径；交互式 shell 中的 `node --version` 不能代表服务实际版本。升级后重新执行 `npm ci` 并重启 DSH 与 bridge。
+
+官方依据：[2026-10-21 Node.js 安全公告](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)、[Node.js 版本状态](https://nodejs.org/en/about/previous-releases)、[v22.23.4 LTS](https://nodejs.org/en/blog/release/v22.23.4)、[v24.22.1 LTS](https://nodejs.org/en/blog/release/v24.22.1)、[v26.12.1 Current](https://nodejs.org/en/blog/release/v26.12.1)、[EOL 说明](https://nodejs.org/en/about/eol)。
+
 ---
 
 ## 三、已知残余风险（明确不修 / 修不了，必须让用户知道）
