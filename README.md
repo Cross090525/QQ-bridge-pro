@@ -1,6 +1,6 @@
 # QQ-bridge-pro：面向 QQ Agent 的开放桥接框架
 
-[English](README.en.md) · [详细架构图](docs/guides/FRAMEWORK_ARCHITECTURE.md) · [文档索引](docs/README.md) · [权限规则](RULES.md)
+[English](README.en.md) · [贡献指南](CONTRIBUTING.md) · [详细架构图](docs/guides/FRAMEWORK_ARCHITECTURE.md) · [文档索引](docs/README.md) · [权限规则](RULES.md)
 
 把 QQ 群聊和私聊接入 DeepSeek Harness（DSH），让 Agent 根据任务按需读取上下文、调用内容服务与记忆插件，再通过 QQ 回复。
 

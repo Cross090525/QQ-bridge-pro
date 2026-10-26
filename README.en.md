@@ -1,6 +1,6 @@
 # QQ-bridge-pro: an extensible framework for QQ agents
 
-[中文](README.md) · [Architecture diagrams](docs/guides/FRAMEWORK_ARCHITECTURE.md) · [Documentation](docs/README.md) · [Permission rules](RULES.md)
+[中文](README.md) · [Contributing](CONTRIBUTING.md) · [Architecture diagrams](docs/guides/FRAMEWORK_ARCHITECTURE.md) · [Documentation](docs/README.md) · [Permission rules](RULES.md)
 
 Connect QQ groups and private conversations to DeepSeek Harness (DSH). Agents retrieve relevant context, select content and memory services when needed, and reply through QQ.
 
