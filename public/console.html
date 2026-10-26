@@ -2256,7 +2256,7 @@ button:active:not(:disabled) {
 <details class="settings-group"><summary>开放记忆提供者（存储与处理由插件负责）</summary><div class="settings-content">
       <p class="meta">配置 memory.provider / memory.providers 后使用。未配置时禁用；读取、修改与清空均经过授权，旧内置记忆不再作为后备。分类由插件定义。</p>
       <div class="row">
-        <input type="text" id="v2MemoryKey" placeholder="group:123456789" style="flex:1">
+        <input type="text" id="v2MemoryKey" placeholder="group:群号" style="flex:1">
         <button id="v2MemoryLoad" class="small">加载记忆</button>
         <button id="v2MemoryClearAll" class="small danger">清空全部</button>
         <span class="meta" id="v2MemoryMsg"></span>
@@ -2266,7 +2266,7 @@ button:active:not(:disabled) {
       </div></details>
 <details class="settings-group"><summary>唤醒状态（AI 当前设置的下一次唤醒条件/倒计时）</summary><div class="settings-content">
       <div class="row">
-        <input type="text" id="v2WakeKey" placeholder="group:123456789" style="flex:1">
+        <input type="text" id="v2WakeKey" placeholder="group:群号" style="flex:1">
         <button id="v2WakeStatusLoad" class="small">查看唤醒状态</button>
         <span class="meta" id="v2WakeStatusMsg"></span>
       </div>
@@ -2281,7 +2281,7 @@ button:active:not(:disabled) {
         留空保存等于删除；只写环境背景，别写指令式的要求（那是人格卡/仿真提示词的事）。
       </div>
       <div class="row">
-        <input type="text" id="v2InitPromptKey" placeholder="group:123456789（可从「白名单会话快速选择」带过来）" style="flex:1" aria-label="初始提示词的会话 key">
+        <input type="text" id="v2InitPromptKey" placeholder="group:群号（可从「白名单会话快速选择」带过来）" style="flex:1" aria-label="初始提示词的会话 key">
         <button id="v2InitPromptLoad" class="small">加载</button>
         <button id="v2InitPromptSave" class="small">保存</button>
         <button id="v2InitPromptClear" class="small danger">删除</button>
@@ -2304,7 +2304,7 @@ button:active:not(:disabled) {
       </div></details>
 <details class="settings-group"><summary>会话状态查看</summary><div class="settings-content">
       <div class="row">
-        <input type="text" id="v2StateKey" placeholder="group:123456789" style="flex:1">
+        <input type="text" id="v2StateKey" placeholder="group:群号" style="flex:1">
         <button id="v2StateView" class="small">查看</button>
         <button id="v2ForceWake" class="small">立即唤醒</button>
         <button id="v2StatesList" class="small">列出全部会话状态</button>
@@ -2455,11 +2455,11 @@ button:active:not(:disabled) {
 <section id="section-whitelist" data-page="access" class="card span-all">
       <h2>白名单 / 管理员</h2>
       <label>允许的群号（逗号分隔）</label>
-      <input type="text" id="wlGroups" placeholder="123456789, 123456">
+      <input type="text" id="wlGroups" placeholder="多个群号，以逗号分隔">
       <label>允许的私聊 QQ（逗号分隔）</label>
-      <input type="text" id="wlPrivate" placeholder="123456789">
+      <input type="text" id="wlPrivate" placeholder="多个QQ号，以逗号分隔">
       <label>管理员 QQ（ownerQQ，最高权限）</label>
-      <input type="text" id="ownerQQ" placeholder="123456789">
+      <input type="text" id="ownerQQ" placeholder="管理员QQ号">
       <div class="meta">管理员是唯一可执行管理命令/审批/closed-agent 的 QQ；可留空清除（清除后无管理员，fail-closed）。</div>
       <label>拒绝的群号（黑名单，逗号分隔）</label>
       <input type="text" id="dnGroups" placeholder="">

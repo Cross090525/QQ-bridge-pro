@@ -8,7 +8,7 @@
 | --- | --- |
 | 查看总体架构、六张分层图与实现边界 | [开放框架架构](guides/FRAMEWORK_ARCHITECTURE.md) |
 | 在新设备安装预设与QQ MCP | [DSH端配置](guides/DSH_SETUP.md) |
-| 了解已验证版本与DSH协议变更 | [DSH 0.2.0适配](guides/DSH_020_ADAPTATION.md) |
+| 追溯 DSH 0.2.0-rc.2 适配过程与当时验证记录 | [DSH 0.2.0适配](guides/DSH_020_ADAPTATION.md) |
 | 隔离群聊仿真与管理员私聊任务 | [双模式路由](DUAL_MODE.md) |
 | 查目录、脚本与维护约定 | [目录说明](FOLDER_MAP.md) |
 
@@ -30,10 +30,11 @@
 | 目标 | 文档 |
 | --- | --- |
 | 管理员、群友、模型与工具的权限边界 | [权限规则](../RULES.md) |
-| 修改安全相关代码前了解威胁模型与检查要求 | [安全基线](guides/SECURITY_BASELINE.md) |
+| 查看 Node.js 安全版本、威胁模型与发布前检查 | [安全基线](guides/SECURITY_BASELINE.md) |
 | 了解运行数据与隐私边界 | [隐私说明](guides/PRIVACY.md) |
 | 查看用量、计价口径与控制台统计 | [令牌与花费](guides/TOKEN_USAGE_CONSOLE.md) |
 | 预览控制台并运行离线界面检查 | [控制台测试](guides/CONSOLE-UI-TESTING.md) |
+| 核对项目许可证与第三方上游来源 | [许可证与来源](LICENSE_PROVENANCE.md) |
 
 ## 文档范围
 

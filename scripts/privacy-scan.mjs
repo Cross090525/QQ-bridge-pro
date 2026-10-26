@@ -219,7 +219,12 @@ for (const rel of files) {
   // ② 内容级：一个文件里同一规则最多报 3 处（带行号），方便直接定位；不要把整文件刷屏。
   for (const rule of rules.deny) {
     let re;
-    try { re = new RegExp(rule.pattern, rule.flags ?? 'g'); }
+    // RegExp.exec() only advances lastIndex for global/sticky expressions.
+    // Always enable global matching so each candidate is visited once instead
+    // of repeatedly processing the first match until the iteration cap.
+    const rawFlags = rule.flags ?? '';
+    const flags = rawFlags.includes('g') ? rawFlags : `${rawFlags}g`;
+    try { re = new RegExp(rule.pattern, flags); }
     catch (error) { console.error(`[privacy-scan] 规则「${rule.name}」正则非法：${error.message}`); continue; }
     re.lastIndex = 0;
     let m;

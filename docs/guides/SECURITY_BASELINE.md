@@ -1,11 +1,12 @@
-# 安全基线与威胁模型（qq-bridge → QSH）
+# qq-bridge 安全基线与威胁模型
 
-本机记忆自动授权增量：`memory.providers[].approvalMode: automatic` 是管理员的提供者级授权，只允许 stdio 或回环 HTTP/HTTPS；仅 `memory.<providerId>.<operation>` 使用该例外，普通 write/execute 服务仍逐次审批。显式 deny/ask、有效会话、命名空间、预算与审计保留。Haitang 的实际存储和 MCP 隔离测试为 test:memory:haitang；默认 required 提供者行为不变。
+## 当前安全增量摘要
 
-争论辅助增量：管理员通过独立任务管理 API 授予精确群、对象、议题和期限内的 `auto` 或 `review` 发言权。`x-debate-token` 不是会话令牌，不能访问其他上下文或任意发送；候选事件与草稿均限任务。自动发送不设冷却/次数配额，仍检查任务状态、授权 revision、群白名单、模式、暂停与静默；排队消息在执行前复核。递增 requestSeq 与 requestId/正文/引用绑定，旧草稿淘汰后也不能重放；失败发送不自动重试。新 qq-debate 预设通过 tools 注入、空 allow 列表与执行守卫拒绝所有工具，独立 worker 不把凭据传给模型；只接受正常完成回合的结构化分析。任务重启失效，归档的 DSH 会话仍可能保留资料。详见 [DEBATE_PLUGIN.md](DEBATE_PLUGIN.md)，回归为 test:debate、test:debate:ui、test:debate:dsh。
+- **记忆自动授权**：`memory.providers[].approvalMode: automatic` 是管理员的提供者级授权，只允许 stdio 或回环 HTTP/HTTPS；例外仅适用于 `memory.<providerId>.<operation>`，普通 write/execute 服务仍逐次审批。显式 deny/ask、有效会话、命名空间、预算与审计规则保留；Haitang 的实际存储与 MCP 隔离检查见 `npm run test:memory:haitang`。默认 required 提供者行为不变，详见 [记忆提供者](MEMORY_PROVIDERS.md) 与 [Haitang 适配](HAITANG_MEMORY.md)。
+- **争论辅助**：管理员通过独立任务管理 API 授予精确群、对象、议题和期限内的 `auto` 或 `review` 发言权。`x-debate-token` 不是会话令牌，不能访问其他上下文或任意发送；候选事件与草稿均限任务。自动发送不设冷却/次数配额，仍检查任务状态、授权 revision、群白名单、模式、暂停与静默；排队消息在执行前复核。递增 requestSeq 与 requestId/正文/引用绑定，旧草稿淘汰后也不能重放；失败发送不自动重试。`qq-debate` 预设拒绝所有工具，独立 worker 不把凭据传给模型；只接受正常完成回合的结构化分析。任务重启失效，归档的 DSH 会话仍可能保留资料。详见 [争论辅助插件](DEBATE_PLUGIN.md)，回归命令为 `npm run test:debate`、`npm run test:debate:ui`、`npm run test:debate:dsh`。
 
 > 本文把项目里**已经实现的**安全边界、**已知的**残余风险、以及**每次发布必须回归**的
-> 检查项集中到一处。与之配套的承诺性文档是 [../RULES.md](../RULES.md)（面向使用者的
+> 检查项集中到一处。与之配套的承诺性文档是 [RULES.md](../../RULES.md)（面向使用者的
 > 权限说明）；本文偏工程实现，供改动代码前后对照。
 >
 > 维护规则：任何改动如果改变了下面任一条目，**必须在同一个 PR 里更新本文**。
@@ -40,15 +41,15 @@
 
 ### 2. 工具面（agent 能做什么）
 
-2026-10-24 扩展接口增量：管理员可以在受限预设的 `qq-tool-restrict.config.allowedMcpTools` 中列出至多 64 个完整第三方 MCP 工具名，执行期精确放行，不支持通配符或本地通用 skill/shell 工具。默认仍只有原内置工具。允许第三方 MCP 代表信任该实现；它自身的进程权限不由 bridge 沙箱化。参考 [EXTENSION_API.md](EXTENSION_API.md)。
+第三方 MCP 能力必须通过 `framework.services` 注册固定服务，再由 `framework.permissions.rules` 授予精确能力与数据范围。仿真预设不接受 `allowedMcpTools` 直连放行；非空列表会被守卫拒绝。服务进程仍以其宿主权限运行，不由 bridge 沙箱化。参考 [EXTENSION_API.md](EXTENSION_API.md) 与 [EXTENSION_PERMISSIONS.md](EXTENSION_PERMISSIONS.md)。
 
 | 机制 | 位置 | 行为 |
 | --- | --- | --- |
-| 预设工具守卫 | `plugins/qq-agent-presets/qq-tool-restrict.mjs`（唯一权威实现，`dsh/agent-presets/*/qq-tool-restrict.mjs` 只是 re-export 壳） | 两道闸门：① 注册期 `tools.restrict({deny})` 把本地执行/宿主运行期工具**从模型 schema 里隐藏**（67 个名字，2026-09-29 按 DSH 0.2.0-rc.2 真实工具清单重新对账）；② 执行期 `tools.guard` 精确白名单：仅 `mcp__snowluma__*` / `mcp__snowluma-host__*` / `mcp__web-search-safe__*` + `ask_user_question` / `todo_write`；空/未知名字一律拒绝；内置 `tool-web` 的 search/fetch 关闭。对账工具：`npm run scan:tool-names`（**每次升级 DSH 后应跑一次**：`tools.restrict` 对不存在的名字会抛错并被逐个 try/catch 吞掉 ⇒ 假名 = 静默失效；新版本新增的能力若不补进名单 = 漏隐藏） |
+| 预设工具守卫 | `plugins/qq-agent-presets/qq-tool-restrict.mjs`（唯一权威实现，`dsh/agent-presets/*/qq-tool-restrict.mjs` 只是 re-export 壳） | 两道闸门：① 注册期 `tools.restrict({deny})` 把本地执行/宿主运行期工具**从模型 schema 里隐藏**；② 执行期 `tools.guard` 精确白名单：仅 `mcp__snowluma__*` / `mcp__snowluma-host__*` / `mcp__web-search-safe__*` + `ask_user_question` / `todo_write`；空/未知名字一律拒绝；内置 `tool-web` 的 search/fetch 关闭。名单需按实际安装的 DSH 版本对账：运行 `npm run scan:tool-names`。未知名字会使 `tools.restrict` 逐项静默失效；新版本新增的危险能力若未补入名单，也可能漏隐藏。 |
 | 预设 fail-closed | `resolvePresetName()` + `ensureSession()` | 群聊/仿真会话拿不到受限预设时**拒绝建会话**，绝不回退到含本地工具的 DSH 默认预设；只有 `closed-agent`（管理员私聊）允许回退 |
 | 发送强制白名单 | 所有 `/api/send/*`、`/api/socialV2/send-*` | 目标必须命中 `allow.groups` / `allow.private`（每次都重新校验，不做缓存） |
 | 动态 ACL | `resolveVoicePathForV2()` / `voicePathInsideLibrary()` | 语音只能取语音库目录内的文件；贴纸只能发收藏库内的表情；图片只能读 SnowLuma home 内的本地文件（realpath 复核防符号链接逃逸） |
-| **只探测、不部署**（L6 设计不变量） | `mcp-host-server.js` | 该 MCP server **只提供 `snowluma_status`（只读探活 `get_login_info`）**。⚠️ **v0.1.5 起删除了 `start_snowluma` / `stop_snowluma` 与 `snowluma.allowProcessControl`**：SnowLuma EULA §5.4 规定「将其并入第三方安装包或 Docker 镜像、**通过自动化脚本部署**」须事先书面授权，原生组件属**专有组件**。⇒ 本程序不安装、不复制、不打包、不程序化启停 SnowLuma；用户自行安装与启动。详见 `LICENSE` 与 `QSH-plan/QSH_PLAN.md` §6.0 |
+| **只探测、不部署**（实现边界） | `mcp-host-server.js` | 该 MCP server **只提供 `snowluma_status`（只读探活 `get_login_info`）**。本程序不安装、复制、打包或自动启停 SnowLuma；用户自行安装与启动。SnowLuma 与其原生组件按各自许可约束，不属于本仓库 MIT 许可范围；详见本仓库 [LICENSE](../../LICENSE) 与 [许可证来源核查](../LICENSE_PROVENANCE.md)。 |
 
 ### 3. 出站内容（模型能说什么、能发什么）
 
@@ -94,7 +95,7 @@
 | 路径校验（读点） | `roleRawContent()` 等 | 人格名在**读取点**也做 `sanitizeRoleName` + `path.resolve` 包含性校验（`state/current-role.json` 是用户可直接编辑的文件） |
 | 原型污染 | 记忆写入/加载 | `__proto__` / `constructor` / `prototype` 键在写入与加载两侧都被拒绝；配置合并用对象展开（不触发 setter） |
 
-### 6. 与 DSH 沙箱的 ACL 交互（DSH 0.2.0 起；**这是有意的取舍，不是缺陷**）
+### 6. 与 DSH 沙箱的 ACL 交互（本项目在 DSH 0.2.0-rc.2 的实测；**这是有意的取舍，不是缺陷**）
 
 DSH 的 Windows 文件沙箱按**能力 SID** 授权：SID 由 `sha256(规范化工作区路径)` 派生
 （形如 `S-1-4-<a>-<b>`；同一个工作区路径每次会话派生出同一个 SID，**重命名工作区会换一个**），
@@ -151,7 +152,7 @@ DSH 的 Windows 文件沙箱按**能力 SID** 授权：SID 由 `sha256(规范化
 | 24.x | `24.22.1` | LTS（Krypton） |
 | 26.x | `26.12.1` | Current |
 
-表中版本是 2026-10-21 公告对应的最低修补版本；如果安装时所选主版本线已有更新的安全补丁，应安装更新版本。生产环境优先使用仍受支持的 LTS 版本。
+表中版本是 2026-10-21 公告对应的最低修补版本；截至 2026-10-26，Node.js 官方[下载页](https://nodejs.org/en/download)仍将 24.22.1 列为 LTS、22.23.4 列为 LTS、26.12.1 列为 Current。如果安装时所选主版本线已有更新的安全补丁，应安装更新版本。生产环境优先使用仍受支持的 LTS 版本。
 
 不要把 `22.13.0` 或任何 EOL 版本当作安全安装目标。Node.js 官方说明 EOL 版本不会继续获得漏洞修复；无法升级的旧版本应视为部署风险，而不是满足本项目的安全基线。
 
@@ -173,14 +174,14 @@ npm --version
 | # | 风险 | 现状与缓解 | 为什么不修 |
 | --- | --- | --- | --- |
 | R1 | **敏感信息审计是启发式的** | 能抓"带赋值关系的凭据"和本机路径；抓不到任意形态的秘密 | 通用秘密检测无法在没有密钥的情况下做对；硬边界在白名单与工具面，审计是兜底 |
-| R2 | **`state/` 里的令牌是明文** | Windows 已用 ACL 收紧；Linux 用 `0700` | 引入凭据库/DPAPI 会显著提高部署门槛，列为 QSH 里程碑 M2 的候选（口令派生已规划） |
+| R2 | **`state/` 里的令牌是明文** | Windows 已用 ACL 收紧；Linux 用 `0700` | 跨平台凭据库需要额外的密钥生命周期与恢复设计；在这些设计明确前维持现有访问控制 |
 | R3 | **贴纸备注跨会话共享** | 只有注入路径做了加固，未做会话隔离 | 单一账号的贴纸库本就是全局的；多群互害场景很少 |
 | R4 | **远程停止不是原子的** | `session/control` + `updateQueue` + `cancel` 是尽力而为，已执行的工具副作用无法回滚 | DSH 协议没有事务语义 |
 | R5 | **离线队列不保证送达** | 每会话最多 50 条，进程退出即丢 | 一致性代价过高；README 已写明 |
 | R6 | **预设不变量检查是子串存在性** | 防误删，不防恶意 | 能改这个文件的人本来就是管理员，真正的硬边界在工具守卫与白名单 |
 | R7 | **`self-test.js` 只证明链路通** | 不做断言 | 它是连通性探针，不是回归套件（回归在 `npm run test:audit`） |
-| R8 | **单人维护、无外部安全审计** | 有离线回归 + 本文档 | 计划在 QSH v1.0 发布前做一次外部/对抗式复审 |
-| R9 | **`state/` 的 ACL 收紧可能失败**（未提权且目录属主权限被策略收走时） | `scripts/harden-state-acl.mjs` 会自动提权重试一次；仍失败则明确告警 + 给出可复制命令 + 控制台告警条 | 改 ACL 属于需要特权的操作；**降级为"明确告警"而不是"阻断启动"**是刻意的取舍（否则用户会为了能启动而关掉整条安全链路）。QSH M2 会用口令派生 + HttpOnly Cookie 把最敏感的控制台凭据从明文落盘里拿掉 |
+| R8 | **单人维护、无外部安全审计** | 有离线回归 + 本文档 | 重大版本发布前仍需安排外部或对抗式复审 |
+| R9 | **`state/` 的 ACL 收紧可能失败**（未提权且目录属主权限被策略收走时） | `scripts/harden-state-acl.mjs` 会自动提权重试一次；仍失败则明确告警 + 给出可复制命令 + 控制台告警条 | 改 ACL 属于需要特权的操作；**降级为"明确告警"而不是"阻断启动"**是刻意的取舍（否则用户会为了能启动而关掉整条安全链路）。若改用口令派生或 HttpOnly Cookie，仍需设计密钥初始化、轮换与恢复流程 |
 | R10 | **收紧 `state/` 后，DSH 沙箱会话写不进 `state/`**（见 §2.6） | 有意取舍，非缺陷；诊断见 `npm run diagnose:acl` | 两者不可兼得：能力 SID 只能靠继承下发，而切断继承正是防"本机其他用户读令牌"的唯一手段。**代价已被接受并写进文档**，项目自己的测试夹具/探针据此改用系统临时目录 |
 | R11 | **`plugins/**` 内容被意外切断继承，沙箱里改不动 L7 守卫** | 来源不明（本仓库无此脚本）；`npm run diagnose:acl` 会列出并打印恢复命令 | 该处不含凭据，恢复继承无泄密风险；但若不恢复，被沙箱约束的 DSH agent 就无法维护工具守卫 —— 需要人工在无沙箱终端改 |
 
@@ -189,7 +190,7 @@ npm --version
 ## 四、发布前必须跑的检查（回归清单）
 
 ```bash
-npm run test:audit          # 30 个离线回归脚本（含安全专项），必须全绿
+npm run test:audit          # scripts/test-audit.mjs 登记的离线回归脚本，必须全绿
 npm run verify:adaptation   # DSH 适配一致性（preset/工具守卫/MCP 挂载/活 DSH 实测）
 npm run verify:persona      # 人格配置一致性
 npm run diagnose:acl        # ACL 收紧路径盘点（只读；需在**无沙箱**终端跑，见 §2.6）
