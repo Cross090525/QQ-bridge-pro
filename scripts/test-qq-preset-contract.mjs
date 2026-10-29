@@ -99,4 +99,14 @@ test('autonomy limits and the observation escape hatch stay described', () => {
   ]) assert.ok(prefix.includes(text), `missing rule: ${text}`);
 });
 
+test('automatic memory handling stays provider-generic and avoids raw transcript ingestion', () => {
+  assert.match(prefix, /【记忆与自动整理】/);
+  assert.match(prefix, /每轮结束时，自动检查本轮已读消息/);
+  assert.ok(prefix.includes('qq_memory(operation=write'));
+  assert.match(prefix, /operation=update/);
+  assert.match(prefix, /先按类别和对象查询以避免重复/);
+  assert.match(prefix, /不复制整段聊天/);
+  assert.match(prefix, /不得例行导入原文或扫描全部历史/);
+});
+
 console.log(`reserved2 persona prefix: ${prefix.length} characters (not a model-token estimate)`);

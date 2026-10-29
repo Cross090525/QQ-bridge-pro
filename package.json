@@ -73,6 +73,8 @@
     "test:memory": "node --test scripts/test-memory-providers.mjs",
     "test:memory:haitang": "node --test scripts/test-haitang-memory.mjs",
     "setup:memory:haitang": "node scripts/setup-haitang-memory.mjs",
+    "memory:migrate:legacy": "node scripts/migrate-legacy-memory.mjs",
+    "test:memory:migrate": "node --test scripts/test-migrate-legacy-memory.mjs",
     "test:debate": "node --test scripts/test-debate.mjs",
     "test:debate:ui": "node scripts/test-debate-ui.mjs",
     "test:debate:dsh": "node scripts/test-debate-dsh.mjs",

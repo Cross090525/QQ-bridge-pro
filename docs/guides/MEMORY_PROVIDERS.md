@@ -193,3 +193,25 @@ node scripts/export-legacy-memory.mjs --archive=state/legacy-memory/归档摘要
 结果 records 是规范 write input；管理员审阅后，通过逐条 write 与审批导入选择的提供者，或使用提供者自己的受信导入工具。脚本使用新建文件模式，拒绝覆盖现有输出。未配置自动导入，不删除原归档。普通会话 reset 不会清除插件中的长期记忆；忘记必须显式调用提供者 delete/clear。
 
 `npm run test:memory` 验证完整生命周期、默认禁用、旧接口替换、HTTP/stdio MCP、命名空间隔离、审批/撤权/预算、选定消息导出、归档与独立持久化。测试使用模拟 QQ/DSH 和真实本机 HTTP/stdio；没有替用户安装或验证某个第三方记忆产品。
+
+## 旧版内置记忆迁入 provider
+
+旧版 QQ Bridge 将 `activeTopics`、`pendingThoughts`、`memberImpressions` 归档到 `state/legacy-memory/*.json`。可以把这些归档按原 `group:ID` / `private:ID` 会话 key 迁入当前默认 provider。这个过程只迁移归档记忆，不会导入 DSH 会话正文、`social-v2.json` 的近期消息或其他聊天历史。
+
+先在 QQ Bridge 项目目录预览：
+
+```sh
+node scripts/migrate-legacy-memory.mjs --dry-run
+```
+
+确认归档数量与类别后执行：
+
+```sh
+node scripts/migrate-legacy-memory.mjs --apply
+```
+
+也可以用 `--archive=PATH` 只选一份归档、用 `--key=group:ID` / `--key=private:ID` 限定会话，或用 `--provider=ID` 指定已配置的 provider。默认只预览；实际导入通过本机 QQ Bridge API 写入，并在导入后逐条核验。原归档不会被修改或删除。
+
+每条记录使用稳定的 `legacy:` ID；重复运行会跳过完全相同的已存在记录。若同 ID 内容冲突，命令会在写入前停止。若某会话存在多个内容不同的归档快照，需用 `--archive=PATH` 明确选择，避免把旧快照也导入。部分请求失败时已成功的记录会保留，修复原因后重跑即可继续。
+
+迁移不会在 Bridge 启动时自动执行。当前仿真代理在实际处理一轮后，会识别值得长期保留的信息，先查重，再写入或更新简短记忆；它不逐条入库原文，也不在休眠时扫描消息或历史档案。
