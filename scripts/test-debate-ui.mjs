@@ -40,8 +40,15 @@ try {
   assert.equal(downloaded.baseUrl, baseUrl);
   assert.ok(!JSON.stringify(downloaded).includes('fixture-console-token'));
   const client = new DebateClient({ baseUrl, taskId: credential.task.id, token: credential.token });
+  assert.equal(credential.task.includeContext, true);
+  const workerId = 'aaaaaaaaaaaaaaaa';
+  await client.heartbeat({ workerId, sequence: 1, state: 'idle' });
+  await page.getByRole('button', { name: '刷新任务与分析', exact: true }).click();
+  await page.locator('#tasks').filter({ hasText: '分析器：在线' }).waitFor();
   h.appendSocialV2Message('group:456', '成员', '电池需要数据', '电池需要数据', false, false, 'm1', [], '234');
   const payload = { requestId: 'ui-1', requestSeq: 1, taskRevision: 0, text: '请说明数据来源。', analysis: '<img src=x onerror=window.injected=1>', verdict: 'uncertain', evidenceIds: [1] };
+  const batch = (await client.batch(workerId)).batch;
+  payload.batchId = batch.id; payload.throughEventId = batch.throughEventId;
   assert.equal((await client.submit(payload)).draft.status, 'sent');
   await page.getByRole('button', { name: '刷新任务与分析', exact: true }).click();
   await page.getByRole('heading', { name: /分析 · 已发送/ }).waitFor();

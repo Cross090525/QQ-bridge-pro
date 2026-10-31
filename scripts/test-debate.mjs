@@ -10,6 +10,7 @@ const KEY = 'group:456';
 const sentCount = h => h.calls.http.filter(call => call.url.endsWith('/send_group_msg')).length;
 const taskInput = extra => ({ key: KEY, targetId: '234', topic: '电动车安全', keywords: ['电池', '事故'], durationMinutes: 30, sendMode: 'auto', ...extra });
 const message = (id, extra = {}) => ({ messageId: String(id), userId: '234', text: '电池是否安全需要数据', plain: '电池是否安全需要数据', sender: '测试成员', ...extra });
+const withBatch = (tasks, task, input) => { const batch = tasks.batch(task); return { ...input, batchId: batch?.id, throughEventId: input.throughEventId ?? batch?.throughEventId }; };
 const draftInput = (seq = 1, extra = {}) => ({ requestId: `draft-${seq}`, requestSeq: seq, taskRevision: 0, text: '请提供这一结论的数据来源。', analysis: '原话未提供统计口径，不能直接判断结论真伪。', verdict: 'uncertain', evidenceIds: [1], ...extra });
 
 async function fixture(run, config = {}) {
@@ -29,7 +30,16 @@ async function fixture(run, config = {}) {
   const create = async extra => {
     const r = await request('/api/debate/tasks', taskInput(extra));
     assert.equal(r.status, 200, JSON.stringify(r.data));
-    return { ...r.data, client: new DebateClient({ baseUrl, taskId: r.data.task.id, token: r.data.token }) };
+    const client = new DebateClient({ baseUrl, taskId: r.data.task.id, token: r.data.token });
+    // Legacy assertion helpers now explicitly acquire a server batch before submission.
+    const submit = client.submit.bind(client), receipts = new Map();
+    client.submit = async input => {
+      if (input.batchId) return submit(input);
+      let batch = receipts.get(input.requestId);
+      if (!batch) { batch = (await client.batch()).batch; receipts.set(input.requestId, batch); }
+      return submit({ ...input, batchId: batch?.id, throughEventId: input.throughEventId ?? batch?.throughEventId });
+    };
+    return { ...r.data, client };
   };
   const receive = (id, key = KEY, userId = '234', content = '电池是否安全需要数据') => h.appendSocialV2Message(key, '成员', content, content, false, false, id, [], userId);
   try { await run({ h, request, create, receive, baseUrl }); }
@@ -167,7 +177,10 @@ test('no send-frequency quota; bounded draft eviction cannot resurrect old reque
   const tasks = new DebateTasks({ assertGroup: () => 'policy', send: async () => { sent++; } });
   const created = tasks.create(taskInput()); const task = tasks.get(created.task.id);
   tasks.ingest(KEY, message(1));
-  for (let i = 1; i <= 110; i++) await tasks.submit(task, draftInput(i));
+  for (let i = 1; i <= 110; i++) {
+    tasks.ingest(KEY, message(i));
+    await tasks.submit(task, withBatch(tasks, task, draftInput(i, { evidenceIds: [i] })));
+  }
   assert.equal(sent, 110); assert.equal(task.drafts.size, 100);
   await assert.rejects(tasks.submit(task, draftInput(1)), /重放/);
   assert.equal(sent, 110);
@@ -177,8 +190,9 @@ test('failed or ambiguous transports are terminal and never automatically retrie
   let attempts = 0;
   const tasks = new DebateTasks({ assertGroup: () => 'policy', send: async () => { attempts++; throw Error('uncertain transport'); } });
   const created = tasks.create(taskInput()); const task = tasks.get(created.task.id); tasks.ingest(KEY, message(1));
-  await assert.rejects(tasks.submit(task, draftInput()), /uncertain/);
-  assert.equal((await tasks.submit(task, draftInput())).status, 'failed');
+  const exact = withBatch(tasks, task, draftInput());
+  await assert.rejects(tasks.submit(task, exact), /uncertain/);
+  assert.equal((await tasks.submit(task, exact)).status, 'failed');
   assert.equal(attempts, 1);
 });
 
@@ -187,7 +201,7 @@ test('skip decisions advance the worker cursor without sending or needing approv
   const tasks = new DebateTasks({ assertGroup: () => 'policy', send: async () => { sent++; } });
   const { task: created } = tasks.create(taskInput()); const task = tasks.get(created.id);
   tasks.ingest(KEY, message(1));
-  const draft = await tasks.submit(task, draftInput(1, { verdict: 'skip', text: '' }));
+  const draft = await tasks.submit(task, withBatch(tasks, task, draftInput(1, { verdict: 'skip', text: '' })));
   assert.equal(draft.status, 'skipped'); assert.equal(sent, 0);
   assert.equal(tasks.view(task).processedThrough, 1);
   assert.equal(tasks.view(task).lastRequestSeq, 1);

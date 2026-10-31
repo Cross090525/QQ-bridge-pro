@@ -41,7 +41,8 @@ export class WorkingMemory {
     const state = copy(this.get(key));
     if (state.messages.some(m => m.id === message.id)) return;
     state.messages.push({ id: String(message.id), seq: message.seq ?? null, messageId: str(message.messageId, 100),
-      sender: str(message.sender, 100), userId: str(message.userId, 30), isSelf: message.isSelf === true,
+      sender: str(message.sender, 100), userId: str(message.userId, 30), isSelf: message.isSelf === true, origin: message.origin === 'debate' ? 'debate' : 'chat',
+      debateTaskId: /^[a-f0-9]{32}$/.test(message.debateTaskId || '') ? message.debateTaskId : '',
       text: str(message.plain ?? message.text, 12000), textTruncated: String(message.plain ?? message.text ?? '').length > 12000,
       replyToMessageId: str(message.replyToMessageId, 100),
       quoteTargetIsSelf: message.quoteTargetIsSelf === true, time: Number(message.time) || this.now(),
