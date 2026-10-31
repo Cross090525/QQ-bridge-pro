@@ -1876,20 +1876,6 @@ button:active:not(:disabled) {
         </div>
       </details>
 
-      <details id="fishTonePanel" style="margin:18px 0">
-        <summary>聊天表达与本地梗库</summary>
-        <p class="meta">模型按聊天风格组织回复；判断和查梗按需使用。润色默认关闭，开启后仍需在「扩展授权」中授权 text.tone。发送内容不会自动改写。</p>
-        <div class="row"><label>设置范围</label><select id="fishToneScope"><option value="defaults">默认</option><option value="conversations">指定会话</option><option value="roles">指定人格</option></select>
-        <input id="fishToneTarget" placeholder="会话 key 或人格名" aria-label="表达设置目标"></div>
-        <div class="row"><label><input type="checkbox" id="fishToneEnabled"> 启用表达引导</label><label><input type="checkbox" id="fishToneRewrite"> 开放可选润色</label></div>
-        <div class="row"><label>性格修饰</label><select id="fishToneStyle"><option value="neutral">沿用人格</option><option value="cute">适度可爱</option><option value="abstract">少量抽象</option></select>
-        <label>润色强度</label><select id="fishToneStrength"><option value="off">关闭</option><option value="light">轻</option><option value="normal">中</option><option value="max">强</option></select></div>
-        <div class="row"><button id="fishToneSave">保存表达设置</button><button id="fishToneReset">恢复继承</button><button id="fishToneReload">重新读取</button></div>
-        <p class="meta">优先级：会话覆盖 ＞ 人格覆盖 ＞ 默认值。只在QQ聊天中注入，不影响管理员工作会话。</p>
-        <label for="fishTonePreviewText">试一下（草稿或要查询的梗）</label><textarea id="fishTonePreviewText" rows="3" maxlength="6000"></textarea>
-        <div class="row"><select id="fishToneOperation" aria-label="表达预览操作"><option value="judge">分析草稿</option><option value="meme">查询梗义</option><option value="tone">预览润色</option></select><button id="fishTonePreview">本地预览</button></div>
-        <div id="fishToneMessage" class="meta" role="status"></div><pre id="fishToneResult" style="white-space:pre-wrap;max-height:360px;overflow:auto"></pre>
-      </details>
       <h3 class="layer-heading">仿真提示词（预设内置）<span class="meta" id="simPromptStatus">加载中…</span></h3>
       <div class="row" style="margin-bottom:8px">
         <label style="flex:0 0 auto">仿真代次</label>
@@ -2054,7 +2040,7 @@ button:active:not(:disabled) {
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="setWakeConfig"> <span><b>qq_set_wake_config</b><span class="meta">设置唤醒/潜水条件：无限期、有限时间、@/名字/关键词/概率等</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="markRead"> <span><b>qq_mark_read</b><span class="meta">标记当前未读为已读（看过但决定不回复）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="memory"> <span><b>qq_memory_append / qq_memory_query</b><span class="meta">轻量记忆：话题/想说的话/群友印象</span></span></label>
-        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="slangQuery"> <span><b>qq_slang_query</b><span class="meta">查询已确认黑话/梗/网络表达</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="slangQuery"> <span><b>qq_slang_query</b><span class="meta">优先查询已确认黑话，未命中时补充通用词典参考</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="slangSubmit"> <span><b>qq_slang_submit</b><span class="meta">AI 提交陌生词/黑话给管理员筛选</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="listStickers"> <span><b>qq_list_stickers</b><span class="meta">查看/搜索 QQ 收藏表情（含备注和本地笔记）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getStickerImage"> <span><b>qq_get_sticker_image</b><span class="meta">看图理解没有备注的收藏表情</span></span></label>
@@ -2422,6 +2408,7 @@ button:active:not(:disabled) {
         <div class="row">
           <label style="flex:1">启用黑话学习</label><input type="checkbox" id="slangEnabled" style="width:auto">
         </div>
+        <div class="row"><label style="flex:1">已确认黑话未命中时，补充通用词典参考（不自动入库）</label><input type="checkbox" id="slangReferenceFallback" style="width:auto"></div>
         <div class="row">
           <label style="flex:1">触发提取最少消息数</label><input type="number" id="slangExtractMin" min="1" style="width:90px">
         </div>
@@ -2461,7 +2448,7 @@ button:active:not(:disabled) {
         <tr><td>qq_send_group_message</td><td>发群消息；可选 <code>replyToMessageId</code> 引用/回复</td></tr>
         <tr><td>qq_reply</td><td>专用“引用/回复”：在群里引用某条消息并发送文本</td></tr>
         <tr><td>qq_send_private_message</td><td>发私聊；可选 <code>replyToMessageId</code> 引用/回复</td></tr>
-        <tr><td>qq_slang_query</td><td>查询已确认黑话/梗/网络表达（只读）</td></tr>
+        <tr><td>qq_slang_query</td><td>优先查询已确认黑话，未命中时补充通用词典参考（只读）</td></tr>
         <tr><td>qq_slang_submit</td><td>AI 提交陌生词/黑话给管理员筛选</td></tr>
       </table>
       <div class="meta" style="margin-top:10px">二代仿真模式工具：qq_get_prompt / qq_get_unread_messages / qq_get_recent_messages / qq_social_state / qq_send_burst / qq_send_message / qq_wait_for_messages / qq_set_wake_config / qq_mark_read / qq_memory_* / qq_slang_query / qq_slang_submit 等。</div>
@@ -2814,67 +2801,6 @@ async function saveMode(mode) {
   }
   return r;
 }
-
-// Local expression settings: owner-only API; display provider text with textContent.
-let fishToneSettings = null;
-function fishToneSelection() {
-  const scope = document.getElementById('fishToneScope').value;
-  return { scope, target: document.getElementById('fishToneTarget').value.trim() };
-}
-function showFishToneForm() {
-  if (!fishToneSettings) return;
-  const {scope, target} = fishToneSelection();
-  document.getElementById('fishToneTarget').disabled = scope === 'defaults';
-  const override = scope === 'defaults' ? {} : fishToneSettings[scope]?.[target];
-  const value = {...fishToneSettings.defaults, ...override};
-  document.getElementById('fishToneEnabled').checked = value.enabled;
-  document.getElementById('fishToneRewrite').checked = value.rewriteEnabled;
-  document.getElementById('fishToneStyle').value = value.style;
-  document.getElementById('fishToneStrength').value = value.strength;
-  document.getElementById('fishToneReset').disabled = scope === 'defaults';
-}
-async function loadFishToneForm() {
-  try {
-    const r = await api('/api/fish-tone'); if (!r.ok) throw new Error(r.error);
-    fishToneSettings = r.settings; showFishToneForm();
-    document.getElementById('fishToneMessage').textContent = '表达设置已读取。';
-  } catch(e) { document.getElementById('fishToneMessage').textContent = e.message || '读取失败'; }
-}
-async function saveFishToneForm(reset = false) {
-  try {
-    if (!fishToneSettings) throw new Error('请先读取设置');
-    const {scope, target} = fishToneSelection();
-    if (scope !== 'defaults' && !target) throw new Error('请填写会话key或人格名');
-    const settings = JSON.parse(JSON.stringify(fishToneSettings));
-    const value = {enabled: document.getElementById('fishToneEnabled').checked,
-      rewriteEnabled: document.getElementById('fishToneRewrite').checked,
-      style: document.getElementById('fishToneStyle').value, strength: document.getElementById('fishToneStrength').value};
-    if (scope === 'defaults') settings.defaults = value;
-    else if (reset) delete settings[scope][target];
-    else Object.defineProperty(settings[scope], target, {value, enumerable:true, configurable:true, writable:true});
-    const r = await api('/api/fish-tone', 'POST', {settings}); if (!r.ok) throw new Error(r.error);
-    fishToneSettings = r.settings; showFishToneForm(); document.getElementById('fishToneMessage').textContent = r.note;
-  } catch(e) { document.getElementById('fishToneMessage').textContent = e.message || '保存失败'; }
-}
-document.getElementById('fishToneScope').addEventListener('change', showFishToneForm);
-document.getElementById('fishToneTarget').addEventListener('input', showFishToneForm);
-document.getElementById('fishToneReload').addEventListener('click', loadFishToneForm);
-document.getElementById('fishToneSave').addEventListener('click', () => saveFishToneForm());
-document.getElementById('fishToneReset').addEventListener('click', () => saveFishToneForm(true));
-document.getElementById('fishTonePreview').addEventListener('click', async () => {
-  try {
-    const {scope,target} = fishToneSelection();
-    const r = await api('/api/fish-tone/preview', 'POST', {operation:document.getElementById('fishToneOperation').value,
-      input:{text:document.getElementById('fishTonePreviewText').value},
-      ...(scope === 'conversations' ? {key:target} : {}), ...(scope === 'roles' ? {role:target} : {})});
-    if (!r.ok) throw new Error(r.error);
-    document.getElementById('fishToneResult').textContent = JSON.stringify(r.result, null, 2);
-    document.getElementById('fishToneMessage').textContent = '本地预览完成，未发送消息。';
-  } catch(e) { document.getElementById('fishToneMessage').textContent = e.message || '预览失败'; }
-});
-document.getElementById('fishTonePanel').addEventListener('toggle', () => {
-  if (document.getElementById('fishTonePanel').open && !fishToneSettings) loadFishToneForm();
-});
 
 // ── 人格管理 ────────────────────────────────────────────────────────────────
 // 人格提示词 = roles/<名称>.md，桥接每条消息注入，保存即生效。
@@ -4473,6 +4399,7 @@ function loadSlangConfig() {
   api('/api/slang').then(r => {
     const c = r.config || {};
     document.getElementById('slangEnabled').checked = c.enabled !== false;
+    document.getElementById('slangReferenceFallback').checked = c.referenceFallback !== false;
     document.getElementById('slangExtractMin').value = c.extractMinMessages ?? 10;
     document.getElementById('slangCooldown').value = c.extractCooldownMs ?? 300000;
     document.getElementById('slangThresholds').value = (c.inferenceThresholds || [2, 4, 8]).join(', ');
@@ -4485,6 +4412,7 @@ function loadSlangConfig() {
 document.getElementById('slangConfigSave').addEventListener('click', async () => {
   const r = await api('/api/slang/config', 'POST', {
     enabled: document.getElementById('slangEnabled').checked,
+    referenceFallback: document.getElementById('slangReferenceFallback').checked,
     extractMinMessages: Number(document.getElementById('slangExtractMin').value) || 10,
     extractCooldownMs: Number(document.getElementById('slangCooldown').value) || 300000,
     inferenceThresholds: document.getElementById('slangThresholds').value.split(/[,，\s]+/).map(Number).filter(Boolean),

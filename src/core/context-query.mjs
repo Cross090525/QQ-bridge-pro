@@ -1,5 +1,6 @@
 // Read-only, bounded context selection. Never receives credentials or other sessions.
 import { compactModelMessage } from '../qq-model-view.js';
+import { lookupSlangReference } from '../slang-reference.mjs';
 
 export const CONTEXT_KINDS = Object.freeze(['memory', 'slang', 'history', 'role']);
 
@@ -40,9 +41,9 @@ function score(text, query) {
 
 // Budget applies to the whole JSON result. Oversized first items are returned as
 // explicit excerpts; callers can paginate without silently skipping that item.
-function pack(kind, candidates, options) {
+function pack(kind, candidates, options, provenance = {}) {
   const selected = candidates.slice(options.offset, options.offset + options.limit);
-  const result = { kind, total: candidates.length, items: [], nextOffset: null, truncated: false };
+  const result = { kind, total: candidates.length, items: [], nextOffset: null, truncated: false, ...provenance };
   for (const item of selected) {
     result.items.push(item);
     if (JSON.stringify(result).length <= options.maxChars - 80) continue;
@@ -87,5 +88,10 @@ export function queryConversationContext(source, input = {}, now = Date.now()) {
     .filter(entry => entry.relevance > 0)
     .sort((a, b) => b.relevance - a.relevance || (Number(b.item.updatedAt) || 0) - (Number(a.item.updatedAt) || 0) || a.index - b.index)
     .map(entry => entry.item);
+  if (kind === 'slang' && !items.length && query && source.slangReferenceFallback === true) {
+    const references = lookupSlangReference(query);
+    return pack(kind, references, options, { provenance: 'static-reference',
+      note: '已确认黑话未命中；以下仅为通用词典参考，未经本群确认，不能覆盖本群用法或自动写入黑话库。' });
+  }
   return pack(kind, items, options);
 }

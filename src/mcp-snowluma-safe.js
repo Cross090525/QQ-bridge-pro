@@ -1063,7 +1063,7 @@ server.tool(
 
 server.tool(
   'qq_slang_query',
-  '按需搜索已确认的群聊黑话/梗。遇到不熟悉的词再查，返回匹配的有界结果；更多或分页查询用 qq_context_query(kind="slang")。',
+  '统一黑话查询：优先返回已确认的本地用法；未命中时可返回标为static-reference的通用词典参考，未经本群确认，不能覆盖本群用法。遇到陌生词再查；分页用qq_context_query(kind="slang")。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().min(1).describe('会话令牌（见唤醒提示中的【会话令牌】）'),

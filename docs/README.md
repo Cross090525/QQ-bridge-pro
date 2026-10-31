@@ -21,7 +21,7 @@
 | 精确能力授权、一次性审批、管理员QQ通知和私聊指令 | [扩展授权与审批](guides/EXTENSION_PERMISSIONS.md) |
 | 理解审批设计与阶段边界，实际行为以实现说明为准 | [审批设计记录](guides/EXTENSION_PERMISSIONS_DESIGN.md) |
 | 视频分镜、字幕/ASR、zoom复查与安装迁移 | [视频与动图服务](guides/VIDEO_SERVICES.md) |
-| QQ聊天表达、草稿判断、本地查梗与可选润色 | [聊天表达模块](guides/FISH_TONE.md) |
+| 只读草稿检查、已确认黑话优先的词典补充 | [语言辅助模块](guides/LANGUAGE_SUPPORT.md) |
 | 替换整体记忆模块，实现HTTP / MCP记忆插件 | [开放记忆协议](guides/MEMORY_PROVIDERS.md) |
 | 使用Haitang本地存储/检索与自动记忆授权 | [Haitang适配](guides/HAITANG_MEMORY.md) |
 | 创建限时业务任务并运行独立分析worker | [争论辅助插件](guides/DEBATE_PLUGIN.md) |

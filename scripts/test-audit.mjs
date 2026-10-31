@@ -7,7 +7,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const tests = [
   'test-context-api.mjs',
   'test-content-framework.mjs',
-  'test-fish-tone.mjs',
+  'test-language-support.mjs',
   'test-extension-permissions.mjs',
   'test-memory-providers.mjs',
   'test-dual-mode.mjs', 'test-audit-bridge.mjs', 'test-audit-protocol.mjs', 'test-audit-protocol-helpers.mjs',
