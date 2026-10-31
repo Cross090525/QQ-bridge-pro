@@ -13,6 +13,8 @@ import { BRIDGE_API_VERSION, PUBLIC_API_ROUTES, resolvePublicApiRoute } from './
 import { ContentSourceStore, normalizeIncomingContent, normalizeOutgoingContent, frameworkError } from './framework/content.mjs';
 import { FrameworkMediaStore } from './framework/media-store.mjs';
 import { ContentServiceRuntime } from './framework/services.mjs';
+import { loadFishToneSettings, normalizeFishToneSettings, fishTonePrompt } from './fish-tone.mjs';
+import { runFishTone } from '../integrations/fish-tone-provider.mjs';
 import { ExtensionPermissions, normalizePermissionPolicy, permissionDigest } from './framework/permissions.mjs';
 import { MemoryProviderRuntime } from './framework/memory-providers.mjs';
 import { archiveLegacyMemory, legacyMemoryOperation } from './framework/memory-compat.mjs';
@@ -69,6 +71,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const STATE_DIR = path.join(ROOT, 'state');
+const FISH_TONE_FILE = path.join(STATE_DIR, 'fish-tone.json');
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
@@ -3633,6 +3636,35 @@ async function main() {
             admin: tokenMatches && req.headers['x-agent-token'] === undefined && req.headers['x-agent-call'] === undefined && req.headers['x-debate-token'] === undefined });
           return;
         }
+        if (url.pathname === '/api/fish-tone' || url.pathname === '/api/fish-tone/preview') {
+          if (!tokenMatches || req.headers['x-agent-token'] !== undefined || req.headers['x-agent-call'] !== undefined) {
+            sendJson({ ok: false, error: '聊天表达设置仅供管理员控制台使用' }, 403); return;
+          }
+          if (req.method === 'GET' && url.pathname === '/api/fish-tone') {
+            sendJson({ ok: true, settings: loadFishToneSettings(FISH_TONE_FILE) }); return;
+          }
+          if (req.method === 'POST' && url.pathname === '/api/fish-tone') {
+            const body = await readBody();
+            const settings = normalizeFishToneSettings(body.settings);
+            atomicWriteJson(FISH_TONE_FILE, settings);
+            // Reject late results and cached suggestions from the previous expression policy.
+            const textIds = new Set(['text.judge', 'text.meme', 'text.tone']);
+            contentServices.services = contentServices.services.map(service => textIds.has(service.id)
+              ? { ...service, settingsRevision: permissionDigest(settings) } : service);
+            for (const [signature, cached] of contentServices.cache) if (textIds.has(cached.value.serviceId)) contentServices.cache.delete(signature);
+            sendJson({ ok: true, settings, note: '表达设置已保存，下次QQ提示与内容服务调用生效；发送内容不会自动改写。' }); return;
+          }
+          if (req.method === 'POST' && url.pathname === '/api/fish-tone/preview') {
+            const body = await readBody();
+            const key = body.key || `private:${cfg.ownerQQ}`;
+            const names = { judge: 'text_judge', meme: 'text_meme', tone: 'text_tone' };
+            if (!Object.hasOwn(names, body.operation)) throw frameworkError('预览操作无效');
+            const result = runFishTone(names[body.operation], { input: body.input, context: { key } },
+              { settings: loadFishToneSettings(FISH_TONE_FILE), role: body.role ?? readRoleState().role });
+            sendJson({ ok: true, result: JSON.parse(result.content[0].text) }); return;
+          }
+          sendJson({ ok: false, error: '不支持的请求' }, 405); return;
+        }
         // These endpoints are management-only, even if an agent also supplies a
         // valid console credential. They are never aliases in the public API.
         if (url.pathname.startsWith('/api/extensions/')) {
@@ -4808,7 +4840,7 @@ async function main() {
           }
           const isV2 = modeFor(key) === 'reserved2';
           const roleState = readRoleState();
-          const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+          const roleLine = (roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '') + chatExpressionHint(key);
           // 二代必须带会话令牌，否则 AI 调用任何 MCP 状态/发送工具都会被拒。
           let tokenLine = '';
           if (isV2) {
@@ -10371,9 +10403,15 @@ async function main() {
     return `【你的身份】你在 QQ 上的昵称是${label}${idText}。${callBits}；群名片可能与昵称不同，at/引用段里带${id ? ` ${id} ` : '你的 QQ 号'}就是在叫你。\n\n`;
   }
 
+  function chatExpressionHint(key) {
+    if (modeFor(key) === 'closed-agent') return '';
+    try { return fishTonePrompt(loadFishToneSettings(FISH_TONE_FILE), { key, role: readRoleState().role }); }
+    catch { return '【聊天表达】配置无法读取，保持原有人格，不做机械润色。\n\n'; }
+  }
+
   function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
-    const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+    const roleLine = (roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '') + chatExpressionHint(key);
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const videoHint = st.unread.some(message => message.content?.some(item => item.platform === 'bilibili'))
@@ -10450,7 +10488,7 @@ async function main() {
 
   function buildWakeReminderPromptV2(key) {
     const roleState = readRoleState();
-    const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+    const roleLine = (roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '') + chatExpressionHint(key);
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
@@ -11106,7 +11144,7 @@ async function main() {
     }
 
     // 角色扮演提示注入（仅注入给 agent，不影响群友之间的正常对话语义）
-    const roleHint = routing() && modeFor(key) === 'closed-agent' ? cfg.dualMode.ownerPrompt : currentRoleHint();
+    const roleHint = routing() && modeFor(key) === 'closed-agent' ? cfg.dualMode.ownerPrompt : currentRoleHint() + '\n\n' + chatExpressionHint(key);
 
     // 群聊里带发送者信息，私聊不用；角色提示注入到消息开头（agent 可见）；
     // 管理员消息带身份标记（供 agent 识别，但其权限仍受工具面硬限制）

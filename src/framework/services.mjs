@@ -62,21 +62,23 @@ export function normalizeServices(config = []) {
   });
 }
 
-export function mapServiceArguments(template, source, input, depth = 0) {
+export function mapServiceArguments(template, source, input, depth = 0, context = {}) {
   if (depth > 8) throw frameworkError('参数映射过深');
   if (typeof template === 'string' && template.startsWith('$')) {
-    const match = /^\$(source|input)\.([A-Za-z0-9_]+)$/.exec(template);
+    if (template === '$input') return structuredClone(input);
+    const match = /^\$(source|input|context)\.([A-Za-z0-9_]+)$/.exec(template);
     if (!match || ['__proto__', 'constructor', 'prototype'].includes(match[2])) throw frameworkError('无效的参数映射');
-    const data = match[1] === 'source' ? source : input;
+    if (match[1] === 'context' && match[2] !== 'key') throw frameworkError('上下文仅支持当前会话key');
+    const data = match[1] === 'source' ? source : match[1] === 'input' ? input : context;
     if (!own(data, match[2])) throw frameworkError(`缺少映射参数 ${template}`);
     return data[match[2]];
   }
-  if (Array.isArray(template)) return template.map(value => mapServiceArguments(value, source, input, depth + 1));
+  if (Array.isArray(template)) return template.map(value => mapServiceArguments(value, source, input, depth + 1, context));
   if (template && typeof template === 'object') {
     const output = Object.create(null);
     for (const [name, value] of Object.entries(template)) {
       if (['__proto__', 'constructor', 'prototype'].includes(name)) throw frameworkError('无效的参数名');
-      output[name] = mapServiceArguments(value, source, input, depth + 1);
+      output[name] = mapServiceArguments(value, source, input, depth + 1, context);
     }
     return output;
   }
@@ -136,7 +138,7 @@ export class ContentServiceRuntime {
     let timer;
     const check = () => { if (expired) throw frameworkError('服务调用已超时', 504); checkPermit(); };
     const promise = Promise.race([
-      this.execute(service, { scope, source, input, assertLive: check }),
+      this.execute(service, { key, scope, source, input, assertLive: check }),
       new Promise((_, reject) => { timer = setTimeout(() => { expired = true; reject(frameworkError('内容服务超时', 504)); }, service.timeoutMs); }),
     ]);
     this.inflight.set(signature, promise);
@@ -156,13 +158,13 @@ export class ContentServiceRuntime {
       throw frameworkError('内容服务调用失败，请检查服务配置或服务日志', 502);
     } finally { clearTimeout(timer); this.inflight.delete(signature); }
   }
-  async execute(service, { scope, source, input, assertLive }) {
+  async execute(service, { key, scope, source, input, assertLive }) {
     assertLive();
     let serviceSource = source ? { sourceId: source.sourceId, type: source.type, messageId: source.messageId,
       ...(source.url ? { url: source.url } : {}), ...(source.platform ? { platform: source.platform } : {}) } : { type: 'text' };
     if (source && service.inputMode === 'bytes') serviceSource = { ...serviceSource, ...await this.readSource(source) };
     assertLive();
-    const args = service.arguments ? mapServiceArguments(service.arguments, serviceSource, input) : { source: serviceSource, input };
+    const args = service.arguments ? mapServiceArguments(service.arguments, serviceSource, input, 0, { key }) : { source: serviceSource, input };
     const raw = await this.transport.call(service, args, { assertLive });
     assertLive();
     if (raw?.isError) {

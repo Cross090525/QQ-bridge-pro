@@ -16,6 +16,7 @@ Connect QQ groups and private conversations to DeepSeek Harness (DSH). Agents re
 | Content services | Typed content with `sourceId`; agent-selected calls to fixed registered MCP/HTTP providers |
 | Video and animation | dsh-video-storyboard numbered grids, timestamps, subtitles/local ASR, continuation and zoom for Bilibili and received video/GIF/WebP |
 | Speech recognition | Gateway WAV conversion and local SenseVoice recognition, without a new cloud ASR account |
+| Chat expression | Scoped dsh-fish-tone draft checks and local memes; optional rewriting is off by default. [Guide](docs/guides/FISH_TONE.md) |
 | Output | Text, links, images, stickers and voice handles; **no speech-generation/TTS provider is integrated** |
 | External memory | Replaceable HTTP/MCP providers, Haitang adapter and conversation namespaces; no old built-in fallback |
 | Authorization | Conversation/capability/data-scope grants, single-use approvals, owner QQ notifications, private commands and audit |

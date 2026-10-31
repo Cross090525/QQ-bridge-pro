@@ -14,6 +14,7 @@
 | --- | --- | --- |
 | [`Derpyu520/qq-bridge`](https://github.com/Derpyu520/qq-bridge/blob/main/LICENSE) | 本项目的直接基础；README 保留来源致谢 | 上游使用 MIT。保留原版权与署名；本仓库许可证见根目录 `LICENSE`。 |
 | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/blob/master/LICENSE) | 通过 `@deepseek-ai/*` npm 包接入，没有将 Harness 本体源码复制进仓库 | 上游仓库使用 MIT；各依赖仍按其实际包许可分发。 |
+| [`MX3a48c5/dsh-fish-tone`](https://github.com/MX3a48c5/dsh-fish-tone) | 固定b22b071修订的纯文本算法与静态梗库，放在integrations/vendor/dsh-fish-tone并做适配修正 | MIT，保留上游LICENSE与UPSTREAM.md；不挂载原全局插件与管理路由。 |
 | [`SAOS-3624/dsh-video-storyboard`](https://github.com/SAOS-3624/dsh-video-storyboard) | npm锁定0.5.4，分镜子进程调用其pipeline；不复制上游源码 | Apache-2.0，依赖包中的LICENSE与NOTICE仍适用。 |
 | [`CZX2244/dsh-bilibili`](https://github.com/CZX2244/dsh-bilibili/blob/main/LICENSE) | 历史方案，当前视频适配器已移除动态加载 | 历史引用保留MIT署名；旧源码不再是运行依赖。 |
 | FFmpeg / `@ffmpeg-installer/win32-x64` 4.1.0 | Windows可选外部解码进程；Linux使用部署方配置的兼容构建 | 包声明GPLv3，二进制及源码条款由其自身LICENSE管理，不由桥接MIT覆盖。 |
