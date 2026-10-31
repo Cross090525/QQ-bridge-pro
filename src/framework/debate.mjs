@@ -16,9 +16,9 @@ const cursor = value => {
 // Deliberately ephemeral: a process restart revokes every task credential and draft.
 // A task token grants only this finite API, never a conversation or console token.
 export class DebateTasks {
-  constructor({ now = Date.now, assertGroup, audit = () => {}, send, readContext = () => ({}), onControl = () => {} } = {}) {
+  constructor({ now = Date.now, assertGroup, audit = () => {}, send, readContext = () => ({}), onControl = () => {}, beforeBatch = () => {} } = {}) {
     this.now = now; this.assertGroup = assertGroup; this.audit = audit; this.send = send; this.readContext = readContext;
-    this.tasks = new Map(); this.onControl = onControl;
+    this.tasks = new Map(); this.onControl = onControl; this.beforeBatch = beforeBatch;
   }
   record(event, task, extra = {}) {
     this.audit({ event: `debate-${event}`, key: task.key, taskId: task.id, ...extra });
@@ -127,7 +127,7 @@ export class DebateTasks {
     this.live(task);
     if (!/^[a-f0-9-]{16,64}$/.test(input.workerId ?? '') || !Number.isSafeInteger(input.sequence) || input.sequence < 1
       || !['idle', 'analyzing', 'blocked', 'error', 'stopped'].includes(input.state)
-      || !['', 'context_gap', 'analysis_failed', 'transport_failed'].includes(input.error ?? '')) throw frameworkError('worker状态无效');
+      || !['', 'context_gap', 'analysis_failed', 'transport_failed', 'quota_exhausted'].includes(input.error ?? '')) throw frameworkError('worker状态无效');
     if (task.worker && task.worker.id !== input.workerId && this.now() - task.worker.lastSeenAt < 6000 && task.worker.state !== 'stopped') throw frameworkError('已有另一个worker在线', 409);
     if (task.worker?.id === input.workerId && input.sequence <= task.worker.sequence) return this.view(task);
     task.worker = { id: input.workerId, sequence: input.sequence, state: input.state, error: input.error || '', lastSeenAt: this.now() };
@@ -143,6 +143,7 @@ export class DebateTasks {
     const refresh = !events.length && !!task.lastAnalysis && task.lastAnalysis.contextVersion !== contextVersion;
     const messages = refresh ? structuredClone(task.lastAnalysis.messages) : selectDebateBatch(events);
     if (!messages.length) return null;
+    this.beforeBatch(task);
     const batch = { id: randomBytes(16).toString('hex'), taskRevision: task.revision, eventVersion: task.nextEvent,
       contextVersion, throughEventId: messages.at(-1).id, hasMore: messages.at(-1).id < task.nextEvent,
       messages, context, refresh, debateState: structuredClone(task.debateState), workerId,

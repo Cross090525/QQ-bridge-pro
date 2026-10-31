@@ -55,7 +55,9 @@ export async function runDebateWorker({ client, analyzer, signal, onResult = () 
       const abort = () => active?.abort(signal.reason);
       signal?.addEventListener('abort', abort, { once: true });
       try {
+        const wasQuotaBlocked = state === 'blocked' && error === 'quota_exhausted';
         state = 'analyzing'; error = '';
+        if (wasQuotaBlocked) await client.heartbeat({ workerId, state, error, sequence: ++sequence });
         const result = await processDebateBatch({ client, analyzer, workerId, signal: active.signal, previousResponses,
           onBatch: batch => { activeBatch = batch; } });
         state = 'idle'; onResult(result);
@@ -64,6 +66,11 @@ export async function runDebateWorker({ client, analyzer, signal, onResult = () 
         if (signal?.aborted) break;
         if (healthError) throw healthError;
         if (active.signal.reason?.stale) { state = 'idle'; continue; }
+        if (failure.statusCode === 429 && failure.code === 'QUOTA_EXHAUSTED') {
+          state = 'blocked'; error = 'quota_exhausted'; await ping();
+          if (healthError) throw healthError;
+          await delay(5000, undefined, { signal }); continue;
+        }
         if (failure.statusCode === 409) {
           error = /淘汰/.test(failure.message) ? 'context_gap' : '';
           state = error ? 'blocked' : 'idle';

@@ -2228,7 +2228,8 @@ button:active:not(:disabled) {
       <pre id="v2FeedbackOutput">（空）</pre>
 
       </div></details>
-<details class="settings-group" id="debatePanel"><summary>争论辅助</summary><div class="settings-content"><p>管理员指定群、对象、议题和有效期，可一次授权任务内自动发言。不设发送冷却或次数上限。</p><button type="button" onclick="location.href='/debate?token='+encodeURIComponent(localStorage.getItem('consoleToken')||'')">打开争论任务管理</button></div></details>
+<details class="settings-group" id="quotaPanel"><summary>用量与额度</summary><div class="settings-content"><p>统一设置图片、视频及其他调用次数。达限后暂缓，到期自动恢复；也可通知管理员批准一次提前重置。</p><button type="button" onclick="location.href='/quotas?token='+encodeURIComponent(localStorage.getItem('consoleToken')||'')">打开用量与额度</button></div></details>
+<details class="settings-group" id="debatePanel"><summary>争论辅助</summary><div class="settings-content"><p>管理员指定群、对象、议题和有效期，可一次授权任务内自动发言。启用统一额度后仍受相应分析与发送额度约束。</p><button type="button" onclick="location.href='/debate?token='+encodeURIComponent(localStorage.getItem('consoleToken')||'')">打开争论任务管理</button></div></details>
 <details class="settings-group" id="workingMemoryPanel"><summary>实时工作记忆</summary><div class="settings-content">
 <p class="meta">持续理解近期聊天、媒体与话题，再决定是否发言。每个群独立保存；长期记忆仍使用下方提供者。</p>
 <div class="row"><label style="display:flex;align-items:center;gap:8px;flex:1;width:auto"><input type="checkbox" id="workingMemoryEnabled" style="width:auto;flex:none"> 自动观察与实时工作记忆</label><button id="workingMemorySave" class="small">保存观察设置</button></div>

@@ -17,7 +17,9 @@ export class DebateClient {
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30000) });
     const data = await response.json();
     if (!response.ok || !data.ok) {
-      const error = new Error(data.error || `HTTP ${response.status}`); error.statusCode = response.status; throw error;
+      const error = new Error(data.error || `HTTP ${response.status}`); error.statusCode = response.status;
+      if (data.code === 'QUOTA_EXHAUSTED') { error.code = data.code; error.resetsAt = data.resetsAt; }
+      throw error;
     }
     return data;
   }

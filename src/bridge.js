@@ -21,6 +21,7 @@ import { DebateTasks, handleDebateApi } from './framework/debate.mjs';
 import { projectDebateContext } from './framework/debate-context.mjs';
 import { DebateRequests, normalizeDebateWake } from './framework/debate-requests.mjs';
 import { ManagedDebateWorkers } from './framework/debate-workers.mjs';
+import { UsageQuotas, normalizeQuotaConfig, QUOTA_RESOURCES } from './core/usage-quotas.mjs';
 let closeContentServices = async () => {};
 import os from 'node:os';
 import http from 'node:http';
@@ -710,6 +711,7 @@ function loadConfig() {
     framework: file.framework ?? { services: [] },
     memory: file.memory ?? { provider: null, providers: [] },
     debate: { groupWake: normalizeDebateWake(file.debate?.groupWake) },
+    quotas: normalizeQuotaConfig(file.quotas),
     // 价目表覆盖项（可选）。留空即用 src/model-prices.js 的官方默认价。
     pricing: file.pricing ?? null,
     security: {
@@ -1455,8 +1457,44 @@ async function main() {
       log(lastSendFailed.get(ownerKey) ? '扩展审批管理员 QQ 通知发送失败' : '扩展审批已通知管理员 QQ');
     } catch { log('扩展审批管理员 QQ 通知失败；可在控制台查看'); }
   } });
+  const quotaFile = path.join(STATE_DIR, 'usage-quotas.json');
+  const usageQuotas = new UsageQuotas({ config: cfg.quotas,
+    state: fs.existsSync(quotaFile) ? readConfigObject(quotaFile) : null,
+    save: state => atomicWriteJson(quotaFile, state), audit: entry => extensionPermissions.record(entry),
+    notify: async bucket => {
+      if (!cfg.ownerQQ) { log('用量暂满，将到期自动恢复；可从控制台提前重置（未配置 ownerQQ）'); return; }
+      const key = `private:${cfg.ownerQQ}`;
+      await requestContext.run({ quotaNotice: true }, () => sendToQQ(key,
+        `用量暂满\n范围：${bucket.key === '*' ? '全局' : bucket.key}\n资源：${bucket.resource}\n用量：${bucket.used}/${bucket.limit}；窗口：${bucket.windowMs / 60000}分钟\n自动恢复：${new Date(bucket.windowStart + bucket.windowMs).toLocaleString()}\n可等待到期自动恢复，或批准一次提前重置：/quota-approve ${bucket.requestId}\n拒绝提前重置：/quota-deny ${bucket.requestId}\n可在控制台“用量与额度”查看。`));
+    },
+    onReset: bucket => {
+      for (const [signature, job] of observationJobs) if (job.quotaBlocked && (bucket.key === '*' || job.key === bucket.key)) observationJobs.delete(signature);
+      for (const key of socialV2.conversations.keys()) if ((bucket.key === '*' || key === bucket.key) && modeFor(key) === 'reserved2' && isSessionAllowedInCurrentMode(key) && !socialV2.paused) requestContext.run({}, () => scheduleWakeV2(key, 'mediaReady'));
+    },
+  });
+  extensionPermissions.quotas = usageQuotas;
+  function usageLegacy(resource, key) {
+    if (modeFor(key) === 'closed-agent' && resource !== 'send.voice') return [];
+    const c = resource === 'model.wake' ? cfg.socialV2?.wake : resource === 'send.voice' ? voiceCfg() : cfg.socialV2?.send;
+    return [[60000, Number(resource === 'model.wake' ? c?.maxWakePerMinute : resource === 'send.voice' ? c?.maxPerMinute : c?.maxSendPerMinute) || 0],
+      [3600000, Number(resource === 'model.wake' ? c?.maxWakePerHour : resource === 'send.voice' ? c?.maxPerHour : c?.maxSendPerHour) || 0]];
+  }
+  function consumeUsage(key, resource, legacy = []) {
+    return requestContext.getStore()?.quotaNotice ? { check() {} } : usageQuotas.consume(key, resource, { legacy });
+  }
+  function mediaUsage(key, source, serviceId = '') {
+    if (!usageQuotas.enabled) return { check() {} };
+    const unit = requestContext.getStore()?.mediaQuota;
+    if (unit && unit.key === key && (!source.sourceId || unit.sourceId === source.sourceId) && unit.permit) { unit.permit.check(); return unit.permit; }
+    const resource = ['image', 'sticker'].includes(source.type || source.kind) ? 'media.image'
+      : source.type === 'video' || serviceId.startsWith('bilibili.') || /\.(storyboard|frames)$/.test(serviceId) ? 'media.video' : source.type === 'voice' || /transcript$/.test(serviceId) ? 'media.audio' : null;
+    if (!resource) return { check() {} };
+    const permit = consumeUsage(key, resource);
+    if (unit && unit.key === key && (!source.sourceId || unit.sourceId === source.sourceId)) unit.permit = permit;
+    return permit;
+  }
   const contentServices = new ContentServiceRuntime({ services: cfg.framework?.services ?? [], permissions: extensionPermissions,
-    mediaStore: frameworkMedia, readSource: readFrameworkSource });
+    mediaStore: frameworkMedia, readSource: readFrameworkSource, beforeExecute: ({ key, source, service }) => source ? mediaUsage(key, source, service.id) : null });
   const workingMemory = new WorkingMemory(path.join(STATE_DIR, 'working-memory'));
   const observationJobs = new Map();
   const observationQueue = new ObservationQueue();
@@ -1495,15 +1533,16 @@ async function main() {
       if (!job) {
         if ([...observationJobs.values()].filter(j => !j.done).length >= 24) break;
         if (jobs.length >= 5) break;
-        job = { parts: [], sourceId, done: false, delivered: false };
+        job = { parts: [], sourceId, key, done: false, delivered: false };
         workingMemory.media(key, sourceId, { status: 'pending', evidence: '', summary: '' });
-        job.promise = observationQueue.run(async () => {
+        const observationContext = { ...requestContext.getStore(), mediaQuota: { key, sourceId, permit: null } };
+        job.promise = observationQueue.run(() => requestContext.run(observationContext, async () => {
           try {
             let successful = 0;
             assertLive();
             const source = contentSources.get(key, sourceId);
             if (['image', 'sticker'].includes(source.type) && v2ToolEnabled('getImages')) {
-              const images = await resolveMediaList([{ ...source, kind: source.faceId ? 'face' : source.type }]); assertLive();
+              const images = await resolveMediaList([{ ...source, kind: source.faceId ? 'face' : source.type }], key); assertLive();
               if (!images.some(c => c.type === 'image')) throw Error('图片未读取');
               job.parts.push(...images);
               successful++;
@@ -1521,7 +1560,8 @@ async function main() {
                   job.parts.push(...(result.content || []).filter(c => ['text', 'image'].includes(c.type)).map(c => c.type === 'image'
                     ? { type: 'image', mediaType: c.mimeType || c.mediaType, data: c.data } : c));
                   successful++;
-                } catch {
+                } catch (error) {
+                  if (error?.code === 'QUOTA_EXHAUSTED' || (error?.statusCode === 409 && /^用量/.test(error.message))) throw error;
                   assertLive();
                   job.parts.push({ type: 'text', text: `${serviceId}识别失败，该部分内容未知；不能推断静音或没有画面。` });
                 }
@@ -1533,14 +1573,17 @@ async function main() {
               workingMemory.media(key, sourceId, { status: 'unavailable', evidence: '未取得获准的识别结果；可能未配置服务或识别失败，内容未知，不代表无关。' });
             }
             else workingMemory.media(key, sourceId, { status: 'prepared', evidence: job.parts.filter(c => c.type === 'text').map(c => c.text).join('\n').slice(0, 2500) || '图片证据已准备，需视觉理解。' });
-          } catch {
+          } catch (error) {
             job.parts = [];
-            try { assertLive(); workingMemory.media(key, sourceId, { status: 'failed', evidence: '识别失败或来源已过期，内容未知；可使用获准工具补充，不得假装已理解。' }); } catch {}
+            job.quotaBlocked = error?.code === 'QUOTA_EXHAUSTED';
+            job.retryQuota = error?.statusCode === 409 && /^用量/.test(error.message);
+            try { assertLive(); workingMemory.media(key, sourceId, { status: job.quotaBlocked ? 'quota_blocked' : 'failed', evidence: job.quotaBlocked ? '阅读额度暂满，到期自动恢复，也可请管理员提前重置；内容尚未知。' : '识别失败或来源已过期，内容未知；可使用获准工具补充，不得假装已理解。' }); } catch {}
           } finally {
             job.done = true;
-            try { assertLive(); scheduleWakeV2(key, 'mediaReady'); } catch {}
+            if (job.retryQuota) observationJobs.delete(signature);
+            try { assertLive(); if (!job.quotaBlocked) scheduleWakeV2(key, 'mediaReady'); } catch {}
           }
-        }).catch(() => { job.done = true; });
+        })).catch(() => { job.done = true; });
         observationJobs.set(signature, job);
         // Images are transient; structured summaries and provenance survive restarts.
         while (observationJobs.size > 24) {
@@ -1581,6 +1624,7 @@ async function main() {
     onError: (id, error) => { const task = debateTasks.tasks.get(id); if (task && task.status === 'active') task.worker = { state: 'error', error: task.worker?.error || error, lastSeenAt: 0 }; },
   });
   const debateTasks = new DebateTasks({
+    beforeBatch: task => consumeUsage(task.key, 'debate.analysis'),
     onControl: (task, action) => debateWorkers.control(task, action),
     assertGroup: (key, policy) => {
       if (!key.startsWith('group:') || !isSessionAllowedInCurrentMode(key) || modeFor(key) !== 'reserved2'
@@ -1627,7 +1671,7 @@ async function main() {
         .map(message => ({ ...message, plain: redactKnownTokensOnly(String(message.plain ?? message.text ?? '')) }));
     } });
   closeContentServices = () => {
-    observationStopped = true;
+    observationStopped = true; usageQuotas.close();
     for (const task of debateTasks.tasks.values()) if (task.managedWorker) { try { debateTasks.control(task.id, 'stop'); } catch {} }
     return Promise.allSettled([debateWorkers.close(), contentServices.close(), memoryProviders.close()]);
   };
@@ -1713,7 +1757,7 @@ async function main() {
     const sendCfg = cfg.socialV2?.send ?? {};
     if (st) {
       for (const [windowMs, limit] of [[60000, Number(sendCfg.maxSendPerMinute)], [3600000, Number(sendCfg.maxSendPerHour)]]) {
-        if (limit > 0 && st.sendTimes.filter(time => now - time < windowMs).length >= limit) throw frameworkError('发送频率超限', 429);
+        if (!usageQuotas.enabled && limit > 0 && st.sendTimes.filter(time => now - time < windowMs).length >= limit) throw frameworkError('发送频率超限', 429);
       }
       st.sendTimes.push(now);
     }
@@ -1733,6 +1777,7 @@ async function main() {
           try {
             guard();
             const message = [{ type: 'image', data: { file: 'base64://' + bytes.toString('base64'), ...(output.type === 'sticker' ? { sub_type: 1 } : {}) } }];
+            consumeUsage(key, 'send.message', usageLegacy('send.message', key));
             const response = await fetch(`${String(cfg.snowluma.httpUrl).replace(/\/$/, '')}/${kind === 'group' ? 'send_group_msg' : 'send_private_msg'}`, {
               method: 'POST', headers: { 'content-type': 'application/json', ...(cfg.snowluma.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {}) },
               body: JSON.stringify(kind === 'group' ? { group_id: Number(id), message } : { user_id: Number(id), message }), signal: AbortSignal.timeout(15000),
@@ -2021,6 +2066,7 @@ async function main() {
    */
   function voiceBudgetCheck(scopeKey, cfgV) {
     const now = Date.now();
+    if (usageQuotas.enabled) return;
     const bucket = voiceSendTimes.get(scopeKey) ?? [];
     const inMinute = bucket.filter((t) => now - t < 60000);
     const inHour = bucket.filter((t) => now - t < 3600000);
@@ -2087,6 +2133,7 @@ async function main() {
         // 语音条比图片大、要过一次 SILK 转码，给 60s 预算（文本/图片共用同一 sendChain，
         // 所以这条语音发完之前后面的文本会自然排队，不会插队到语音前面）。
         const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+        consumeUsage(key, 'send.voice', usageLegacy('send.voice', key));
         const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
         const params = kind === 'private'
           ? { user_id: Number(id), message: [recordSegment] }
@@ -2284,6 +2331,7 @@ async function main() {
         // 真人发表情前通常会有短暂停顿，避免“文字刚发完表情立刻跟上”的机械感。
         await sleep(randInt(800, 2000));
         assertSendAllowed();
+        consumeUsage(key, 'send.message', usageLegacy('send.message', key));
         const res = await fetch(`${httpUrl}/${action}`, {
           method: 'POST',
           headers: {
@@ -2359,7 +2407,8 @@ async function main() {
     if (media?.kind === 'image') {
       // 优先取图片字节转 base64，避免 SnowLuma 直接下载聊天图片 URL 失败（带签名/防盗链）。
       // 严禁把消息里的原始 media.url / media.file 直接交给 OneBot 去下载：那会绕过 SSRF/本地文件防护。
-      const img = await fetchOneBotImage(media);
+      const usage = mediaUsage(key, { ...media, type: 'image' });
+      const img = await fetchOneBotImage(media); usage.check();
       if (img?.buffer) {
         file = 'base64://' + img.buffer.toString('base64');
       } else {
@@ -2627,7 +2676,8 @@ async function main() {
     const recentMinute = arr.filter((t) => now - t < 60 * 1000).length;
     const MAX_PER_MINUTE = 2;
     const MAX_PER_HOUR = 10;
-    if (recentMinute >= MAX_PER_MINUTE || arr.length >= MAX_PER_HOUR) return false;
+    if (!usageQuotas.enabled && (recentMinute >= MAX_PER_MINUTE || arr.length >= MAX_PER_HOUR)) return false;
+    consumeUsage(key, 'slang.submit', [[60000, MAX_PER_MINUTE], [3600000, MAX_PER_HOUR]]);
     arr.push(now);
     slangSubmitTimes.set(key, arr);
     return true;
@@ -3777,6 +3827,19 @@ async function main() {
         }
       }
       try {
+        if (url.pathname.startsWith('/api/quotas/')) {
+          if (!tokenMatches || req.headers['x-agent-token'] !== undefined || req.headers['x-agent-call'] !== undefined || req.headers['x-debate-token'] !== undefined) throw frameworkError('用量配置与重置仅供管理员使用', 403);
+          if (req.method === 'GET' && url.pathname === '/api/quotas/status') { sendJson({ ok: true, config: usageQuotas.config, buckets: usageQuotas.list(), resources: [...new Set([...QUOTA_RESOURCES, ...extensionPermissions.policy.rules.map(r => `extension.${r.capability}`)])] }); return; }
+          const body = req.method === 'POST' ? await readBody() : {};
+          if (req.method === 'POST' && url.pathname === '/api/quotas/config') {
+            const config = normalizeQuotaConfig(body), configFile = path.join(ROOT, 'config.json'), file = readConfigObject(configFile);
+            file.quotas = config; atomicWriteJson(configFile, file); cfg.quotas = config;
+            sendJson({ ok: true, config: usageQuotas.configure(config) }); return;
+          }
+          if (req.method === 'POST' && url.pathname === '/api/quotas/review') { sendJson({ ok: true, bucket: usageQuotas.resolve(body.requestId, body.decision) }); return; }
+          if (req.method === 'POST' && url.pathname === '/api/quotas/request') { sendJson({ ok: true, bucket: usageQuotas.requestAgain(body.bucketId) }); return; }
+          throw frameworkError('未知用量管理接口', 404);
+        }
         if (debatePublic || url.pathname.startsWith('/api/debate/')) {
           await handleDebateApi({ req, res, url, readBody, sendJson, tasks: debateTasks, requests: debateRequests, saveWakeConfig: saveDebateWakeConfig,
             admin: tokenMatches && req.headers['x-agent-token'] === undefined && req.headers['x-agent-call'] === undefined && req.headers['x-debate-token'] === undefined });
@@ -3998,6 +4061,10 @@ async function main() {
             sendJson({ ok: false, error: `${readonlyStore}处于只读降级状态（启动时加载失败，未覆盖原文件），本次修改不会落盘；请修复 state/ 下的对应文件后重启桥接` }, 503);
             return;
           }
+        }
+        if (req.method === 'GET' && url.pathname === '/quotas') {
+          if (req.headers['x-agent-token'] !== undefined || req.headers['x-agent-call'] !== undefined || req.headers['x-debate-token'] !== undefined) throw frameworkError('用量管理页仅供管理员使用', 403);
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS }); res.end(fs.readFileSync(path.join(ROOT, 'public', 'quotas.html'), 'utf8')); return;
         }
         if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/debate')) {
           if (url.pathname === '/debate' && (req.headers['x-agent-token'] !== undefined || req.headers['x-agent-call'] !== undefined)) throw frameworkError('争论管理页仅供管理员使用', 403);
@@ -5913,7 +5980,7 @@ async function main() {
             const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
             const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
             const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-            if ((maxPerMinute > 0 && recentMinute + messages.length > maxPerMinute) || (maxPerHour > 0 && recentHour + messages.length > maxPerHour)) {
+            if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + messages.length > maxPerMinute) || (maxPerHour > 0 && recentHour + messages.length > maxPerHour))) {
               sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
               return;
             }
@@ -6045,7 +6112,7 @@ async function main() {
           const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
           const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
           const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-          if ((maxPerMinute > 0 && recentMinute + messages.length > maxPerMinute) || (maxPerHour > 0 && recentHour + messages.length > maxPerHour)) {
+          if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + messages.length > maxPerMinute) || (maxPerHour > 0 && recentHour + messages.length > maxPerHour))) {
             sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
             return;
           }
@@ -6141,7 +6208,7 @@ async function main() {
           const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
           const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
           const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-          if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
+          if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour))) {
             sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
             return;
           }
@@ -6529,7 +6596,7 @@ async function main() {
             const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
             const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
             const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-            if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
+            if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour))) {
               sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
               return;
             }
@@ -6602,12 +6669,13 @@ async function main() {
           const maxPerHour = Math.max(0, Number(collectCfg.maxPerHour) || 0);
           const recentMinute = (st.stickerCollectTimes || []).filter((t) => now - t < 60000).length;
           const recentHour = (st.stickerCollectTimes || []).filter((t) => now - t < 3600000).length;
-          if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
+          if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour))) {
             sendJson({ ok: false, error: '收藏表情太频繁了，请过一会儿再偷图' }, 429);
             return;
           }
           // 先预占收藏次数，避免并发调用绕过限频；失败时回滚。
           st.stickerCollectTimes = st.stickerCollectTimes || [];
+          consumeUsage(key, 'sticker.collect', [[60000, maxPerMinute], [3600000, maxPerHour]]);
           st.stickerCollectTimes.push(now);
           if (st.stickerCollectTimes.length > 500) st.stickerCollectTimes = st.stickerCollectTimes.slice(-500);
           try {
@@ -7064,10 +7132,11 @@ async function main() {
           const fTimes = feedbackTimes.get(key) || [];
           const fRecentMinute = fTimes.filter((t) => fNow - t < 60000).length;
           const fRecentHour = fTimes.filter((t) => fNow - t < 3600000).length;
-          if (fRecentMinute >= 5 || fRecentHour >= 20) {
+          if (!usageQuotas.enabled && (fRecentMinute >= 5 || fRecentHour >= 20)) {
             sendJson({ ok: false, error: '反馈过于频繁，请稍后再试' }, 429);
             return;
           }
+          consumeUsage(key, 'feedback.submit', [[60000, 5], [3600000, 20]]);
           fTimes.push(fNow);
           feedbackTimes.set(key, fTimes.slice(-100));
           const maxLength = Math.max(1, Number(cfg.socialV2?.feedback?.maxLength) || 500);
@@ -7252,11 +7321,11 @@ async function main() {
           if (requestMode() !== 'reserved2') { sendJson({ ok: false, error: '转发媒体读取仅 reserved2 模式可用' }, 403); return; }
           if (!media.length) { sendJson({ ok: true, key, media: [], images: [] }); return; }
           try {
-            const images = await fetchMediaData(media);
+            const images = await fetchMediaData(media, key);
             sendJson({ ok: true, key, media, images });
           } catch (error) {
             log(`转发媒体读取失败 ${key}:`, error?.message ?? error);
-            sendJson({ ok: false, error: `转发媒体读取失败：${error?.message ?? error}` }, 500);
+            sendJson({ ok: false, error: `转发媒体读取失败：${error?.message ?? error}` }, error.statusCode || 500);
           }
           return;
         }
@@ -7425,7 +7494,7 @@ async function main() {
             return;
           }
           try {
-            const images = await fetchMediaData(media);
+            const images = await fetchMediaData(media, key);
             if (agentToken && agentTokenOk(key, agentToken) && v2ToolEnabled('getImages') && workingEnabled()) {
               requestContext.getStore()?.assertLive?.();
               const records = workingMemory.get(key).messages;
@@ -7436,7 +7505,7 @@ async function main() {
             sendJson({ ok: true, messageId, media, images });
           } catch (error) {
             log(`图片查询失败 ${key} ${messageId}: ${error?.message ?? error}`);
-            sendJson({ ok: false, error: `图片查询失败：${error?.message ?? error}` }, 500);
+            sendJson({ ok: false, error: `图片查询失败：${error?.message ?? error}`, ...(error.code === 'QUOTA_EXHAUSTED' ? { code: error.code, resetsAt: error.resetsAt } : {}) }, error.statusCode || 500);
           }
           return;
         }
@@ -7524,7 +7593,7 @@ async function main() {
             const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
             const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
             const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-            if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
+            if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour))) {
               sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
               return;
             }
@@ -7698,7 +7767,7 @@ async function main() {
         sendJson({ ok: false, error: 'not found' }, 404);
       } catch (error) {
         const status = Number(error?.statusCode) || 500;
-        sendJson({ ok: false, error: error?.message ?? String(error) }, status);
+        sendJson({ ok: false, error: error?.message ?? String(error), ...(error.code === 'QUOTA_EXHAUSTED' ? { code: error.code, resetsAt: error.resetsAt } : {}) }, status);
       }
     }));
     server.listen(port, '127.0.0.1', () => {
@@ -7749,6 +7818,7 @@ async function main() {
       sendChain = sendChain
         .then(async () => {
           assertSendAllowed();
+          consumeUsage(key, 'send.message', usageLegacy('send.message', key));
           if (kind === 'private') await withTimeout(bot.sendPrivateMessage(Number(id), text(escapeCqText(part))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
           else await withTimeout(bot.sendGroupMessage(Number(id), text(escapeCqText(part))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
         })
@@ -7985,6 +8055,7 @@ async function main() {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
     const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    consumeUsage(`${kind}:${id}`, 'send.message', usageLegacy('send.message', `${kind}:${id}`));
     const res = await fetch(`${httpUrl}/${action}`, {
       method: 'POST',
       headers: {
@@ -8269,7 +8340,7 @@ async function main() {
     return { text: fallbackText };
   }
 
-  async function resolveMediaList(mediaList) {
+  async function resolveMediaList(mediaList, key) {
     const parts = [];
     let index = 0;
     let totalBytes = 0;
@@ -8280,8 +8351,10 @@ async function main() {
         continue;
       }
       if (!media || typeof media !== 'object') continue;
+      const usage = mediaUsage(key, { ...media, type: 'image' });
       if (media.kind === 'face') {
         const face = await fetchFaceMedia(media);
+        usage.check();
         if (face.buffer) {
           if (totalBytes + face.buffer.length > MAX_MEDIA_BYTES) {
             parts.push({ type: 'text', text: `[表情${index}（图片总大小超限，已跳过）]` });
@@ -8295,6 +8368,7 @@ async function main() {
         }
       } else {
         const img = await fetchOneBotImage(media);
+        usage.check();
         const sticker = media.kind === 'sticker';
         const summary = sticker && media.summary ? `:${String(media.summary).slice(0, 20)}` : '';
         const label = sticker ? (summary ? `[表情${summary}]` : `[表情${index}]`) : `[图片${index}]`;
@@ -8314,7 +8388,7 @@ async function main() {
     return parts;
   }
 
-  async function fetchMediaData(mediaList) {
+  async function fetchMediaData(mediaList, key) {
     const out = [];
     let index = 0;
     let totalBytes = 0;
@@ -8325,8 +8399,10 @@ async function main() {
         continue;
       }
       if (!media || typeof media !== 'object') continue;
+      const usage = mediaUsage(key, { ...media, type: 'image' });
       if (media.kind === 'face') {
         const face = await fetchFaceMedia(media);
+        usage.check();
         if (face.buffer) {
           if (totalBytes + face.buffer.length > MAX_MEDIA_BYTES) {
             out.push({ index, kind: 'face', faceId: media.faceId ? String(media.faceId) : undefined, text: '（图片总大小超限，已跳过）' });
@@ -8346,6 +8422,7 @@ async function main() {
         }
       } else {
         const img = await fetchOneBotImage(media);
+        usage.check();
         const kind = media.kind === 'sticker' ? 'sticker' : 'image';
         const noun = kind === 'sticker' ? '表情' : '图片';
         const base = {
@@ -8484,6 +8561,7 @@ async function main() {
         const err = new Error(`QQ 发送失败 ${failed.length}/${messages.length} 条：${failed[0]?.message ?? '未知错误'}`);
         err.sent = sent.slice();
         if (failed[0]?.statusCode) err.statusCode = failed[0].statusCode;
+        if (failed[0]?.code === 'QUOTA_EXHAUSTED') { err.code = failed[0].code; err.resetsAt = failed[0].resetsAt; }
         throw err;
       }
       return sent;
@@ -9557,7 +9635,9 @@ async function main() {
     const contextualPrompt = () => isOwnerTask ? promptText : withSlangContext(promptText);
     let content = [{ type: 'text', text: contextualPrompt() }, ...observation.parts];
     if (Array.isArray(opts.media) && opts.media.length > 0) {
-      const imageParts = await resolveMediaList(opts.media);
+      let imageParts;
+      try { imageParts = await resolveMediaList(opts.media, key); }
+      catch (error) { if (error.code !== 'QUOTA_EXHAUSTED') throw error; imageParts = [{ type: 'text', text: '图片读取额度暂满，到期自动恢复，也可请管理员提前重置；这些图片内容未知。' }]; }
       content = [{ type: 'text', text: contextualPrompt() }, ...observation.parts, ...imageParts];
     }
     // 媒体解析成功后再标记退场，避免解析异常时残留退场标记。
@@ -10724,7 +10804,7 @@ async function main() {
     const maxPerHour = Number(cfg.socialV2?.wake?.maxWakePerHour) || 0;
     const recentMinute = (st.wakeTimes || []).filter((t) => now - t < 60000).length;
     const recentHour = (st.wakeTimes || []).filter((t) => now - t < 3600000).length;
-    if (!bypassRateLimit && ((maxPerMinute > 0 && recentMinute >= maxPerMinute) || (maxPerHour > 0 && recentHour >= maxPerHour))) {
+    if (!usageQuotas.enabled && !bypassRateLimit && ((maxPerMinute > 0 && recentMinute >= maxPerMinute) || (maxPerHour > 0 && recentHour >= maxPerHour))) {
       let retryAfterMs = 0;
       if (maxPerMinute > 0 && recentMinute >= maxPerMinute) {
         const times = (st.wakeTimes || []).filter((t) => now - t < 60000).sort((a, b) => a - b);
@@ -10759,6 +10839,10 @@ async function main() {
     st.preSleepWaitAccumMs = 0;
     cancelReplyCheckV2(key); // 本次唤醒已接管，清理仍在排队的回复检查
     const wakeTime = now;
+    try { consumeUsage(key, 'model.wake', usageLegacy('model.wake', key)); } catch (error) {
+      if (error.code === 'QUOTA_EXHAUSTED') { appendActivity(`${key} observation quota paused`); return; }
+      throw error;
+    }
     st.wakeTimes.push(wakeTime);
     if (st.wakeTimes.length > 200) st.wakeTimes = st.wakeTimes.slice(-200);
     // 无论提前唤醒还是超时唤醒，都清理有限潜水定时器与 sleepUntil，避免状态残留/重复唤醒
@@ -11173,6 +11257,16 @@ async function main() {
     if (!plainContent && !quoteTargetIsSelf) return;
     const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
     const roleState = readRoleState();
+
+    const quotaDecision = /^\/quota-(approve|deny)\s+([a-f0-9]{32})\s*$/i.exec(plainContent);
+    if (quotaDecision) {
+      if (!isOwner || key !== `private:${cfg.ownerQQ}`) return;
+      try {
+        const bucket = usageQuotas.resolve(quotaDecision[2].toLowerCase(), quotaDecision[1].toLowerCase());
+        await requestContext.run({ quotaNotice: true }, () => sendToQQ(key, bucket.blocked ? '已拒绝提前重置，额度仍会在窗口结束时自动恢复。' : `已批准一次重置：${bucket.resource}（${bucket.key}），用量归零并开启新窗口。`));
+      } catch (error) { await requestContext.run({ quotaNotice: true }, () => sendToQQ(key, `额度审核未生效：${redactSensitiveText(error.message)}`)); }
+      return;
+    }
 
     const debateDecision = /^\/debate-(approve|deny)\s+([a-f0-9]{32})\s*$/i.exec(plainContent);
     if (debateDecision) {

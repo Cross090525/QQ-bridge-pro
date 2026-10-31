@@ -1,7 +1,7 @@
 <!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>争论辅助管理</title>
 <style>body{font:16px/1.6 system-ui;background:#101720;color:#e6edf3;max-width:1000px;margin:32px auto;padding:16px}input,textarea,select,button{font:inherit;padding:8px;margin:5px;background:#1e2b3b;color:inherit;border:1px solid #52677d;border-radius:6px}input,textarea{box-sizing:border-box;max-width:100%}textarea{width:95%}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}article{padding:16px;border:1px solid #52677d;margin:16px 0;border-radius:10px}pre{white-space:pre-wrap;overflow-wrap:anywhere}label{display:inline-block}small{color:#b1c4d6}</style>
-<h1>争论辅助</h1><p>限定群、对象和议题，按证据分析。开启自动发送即授权任务有效期内直接发言，不再逐条审批；不设发送冷却或次数上限。停止或过期后任务凭据失效。</p>
+<h1>争论辅助</h1><p>限定群、对象和议题，按证据分析。开启自动发送即授权任务有效期内直接发言，不再逐条审批；争论本身不另设发送冷却或次数上限；启用统一额度后仍受相应分析和发送额度约束。停止或过期后任务凭据失效。</p>
 <article><h2>群聊唤起与启动审核</h2><p>群友发送“唤起语句 @对象 议题 | 关键词1,关键词2”（也可用 QQ 号代替 @）。只接受消息开头的完整语句；每次都需管理员批准才启动。默认关闭。</p>
 <form id="wake"><label><input id="wakeEnabled" type="checkbox">允许群聊申请</label><br><label for="wakePhrases">自定义唤起语句（每行一条，最多10条，按文字精确匹配）</label><textarea id="wakePhrases" rows="3" maxlength="410" required></textarea><br>
 <label>任务有效期（分钟）<input id="wakeMinutes" type="number" min="1" max="120" value="30" required></label><label>批准后的发送方式<select id="wakeSendMode"><option value="review">每条草稿仍需审核</option><option value="auto">任务内自动发送（无需逐条审核）</option></select></label><label><input id="wakeContext" type="checkbox">带入本群相关近期文字与媒体摘要</label><button>保存唤起设置</button></form>
@@ -45,7 +45,7 @@ async function load(){
     const article=el('article',''); article.append(el('h2',task.topic),el('p',`群 ${task.key.split(':')[1]} · 关注 ${task.targetId} · ${names[task.status]||task.status} · ${task.sendMode==='auto'?'自动发送':'逐条审批'} · 到期 ${new Date(task.expiresAt).toLocaleString()}`));
     const worker=task.worker||{};
     const workerState=task.status==='active'?(names[worker.state]||worker.state||'未连接'):(names[task.status]||task.status);
-    article.append(el('p',`分析器：${worker.online?'在线':'离线'} · ${workerState}${worker.error?' · '+({context_gap:'候选消息有缺口，请结束并重建任务',analysis_failed:'模型分析失败，请查看本机worker日志',transport_failed:'请求或发送结果异常，未自动重发'}[worker.error]||worker.error):''} · 背景：${task.includeContext?'本群相关近期上下文':'仅任务候选消息'}`));
+    article.append(el('p',`分析器：${worker.online?'在线':'离线'} · ${workerState}${worker.error?' · '+({context_gap:'候选消息有缺口，请结束并重建任务',analysis_failed:'模型分析失败，请查看本机worker日志',transport_failed:'请求或发送结果异常，未自动重发',quota_exhausted:'额度暂满，到期自动恢复，也可由管理员提前重置'}[worker.error]||worker.error):''} · 背景：${task.includeContext?'本群相关近期上下文':'仅任务候选消息'}`));
     if(!worker.online&&task.status==='active')article.append(el('small',task.managedWorker?'本机分析器尚未连接或已退出；普通聊天照常观察。可暂停后恢复重启分析器，或结束任务。':'任务授权仍有效，但没有在线分析器；普通聊天照常观察。请使用已下载凭据启动worker。'));
     if(task.needsReassessment)article.append(el('p','背景已更新，等待worker重新评估上次争点。'));
     const state=el('details','');state.append(el('summary','查看当前争点与未解决问题'),el('pre',JSON.stringify(task.debateState||{},null,2)));article.append(state);

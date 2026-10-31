@@ -36,6 +36,7 @@ import { DebateTasks, handleDebateApi } from '../src/framework/debate.mjs';
 import { DebateRequests, normalizeDebateWake } from '../src/framework/debate-requests.mjs';
 import { ManagedDebateWorkers } from '../src/framework/debate-workers.mjs';
 import { projectDebateContext } from '../src/framework/debate-context.mjs';
+import { UsageQuotas, normalizeQuotaConfig, QUOTA_RESOURCES } from '../src/core/usage-quotas.mjs';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -142,7 +143,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     buildWakePromptV2, buildWakeSnapshotV2, sendWakePromptV2, socialV2,
     refreshMode, modeAllowed, modeFor, ownerAgentToken, ownerAgentTokens, sessionPolicy, reconcileSessionPolicies, trackTurnEvent, replayPendingWakeReasonsV2,
     collectors, setupSleepTimerV2,
-    workingMemory, workingEnabled, prepareObservationV2, observationJobs, scheduleWakeV2,
+    workingMemory, workingEnabled, prepareObservationV2, observationJobs, scheduleWakeV2, usageQuotas,
     contentSources, contentServices, frameworkMedia, frameworkScope, extensionPermissions, memoryProviders, debateTasks, debateRequests, debateWorkers,
     getInitialPrompt, setInitialPrompt, loadInitialPrompts, formatInitialPromptV2,
     initialPrompts, initialPromptMaxChars,
@@ -187,6 +188,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...dualMode, ...contextQuery, ...publicApi, WorkingMemory, ObservationQueue, observationServices,
     ...frameworkContent, FrameworkMediaStore, ContentServiceRuntime, ...extensionPermissionsModule, MemoryProviderRuntime, ...memoryCompat, DebateTasks, handleDebateApi, projectDebateContext,
     DebateRequests, normalizeDebateWake, ManagedDebateWorkers, spawn: () => { throw Error('fixture forbids real worker spawning'); },
+    UsageQuotas, normalizeQuotaConfig, QUOTA_RESOURCES,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),
@@ -218,6 +220,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   bridge.setPresets(['standard', 'qq-chat', 'qq-chat-v2']);
   bridge.setReady(true);
   return { ...bridge, calls, temp, async close() {
+    bridge.usageQuotas.close();
     await bridge.debateWorkers.close();
     await bridge.contentServices.close();
     await bridge.memoryProviders.close();

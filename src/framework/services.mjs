@@ -84,11 +84,12 @@ export function mapServiceArguments(template, source, input, depth = 0) {
 }
 
 export class ContentServiceRuntime {
-  constructor({ services = [], permissions = new ExtensionPermissions(), mediaStore, readSource, fetchImpl = globalThis.fetch } = {}) {
+  constructor({ services = [], permissions = new ExtensionPermissions(), mediaStore, readSource, fetchImpl = globalThis.fetch, beforeExecute = () => null } = {}) {
     this.services = normalizeServices(services);
     this.permissions = permissions;
     this.mediaStore = mediaStore;
     this.readSource = readSource;
+    this.beforeExecute = beforeExecute;
     this.transport = new RegisteredServiceTransport({ fetchImpl });
     this.connections = this.transport.connections;
     this.cache = new Map();
@@ -132,9 +133,10 @@ export class ContentServiceRuntime {
     // Never deduplicate approved side effects into a different execution.
     if (this.inflight.has(signature)) { permit.finish('busy'); throw frameworkError('相同内容服务请求正在执行', 409); }
     if (this.inflight.size >= 4) { permit.finish('busy'); throw frameworkError('识别服务繁忙，请稍后重试', 429); }
+    const usage = this.beforeExecute({ key, service, source });
     let expired = false;
     let timer;
-    const check = () => { if (expired) throw frameworkError('服务调用已超时', 504); checkPermit(); };
+    const check = () => { if (expired) throw frameworkError('服务调用已超时', 504); checkPermit(); usage?.check(); };
     const promise = Promise.race([
       this.execute(service, { scope, source, input, assertLive: check }),
       new Promise((_, reject) => { timer = setTimeout(() => { expired = true; reject(frameworkError('内容服务超时', 504)); }, service.timeoutMs); }),
