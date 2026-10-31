@@ -43,6 +43,8 @@ export class QQBridgeClient {
     if (!['query', 'write', 'update', 'delete', 'clear', 'ingest'].includes(operation)) throw new TypeError('未知记忆操作');
     return this.request(`/api/v1/memory/${operation}`, { method: 'POST', body: { providerId, approvalId, input } });
   }
+  workingContext({ query, messageId } = {}) { return this.request('/api/v1/working/context', { params: { query, messageId } }); }
+  updateWorkingContext(input) { return this.request('/api/v1/working/context', { method: 'POST', body: input }); }
   queryContext(query) { return this.request('/api/v1/context/query', { method: 'POST', body: query }); }
   contentServices(sourceId) { return this.request('/api/v1/content/services', { params: { sourceId } }); }
   processContent(serviceId, { sourceId, input = {}, approvalId } = {}) { return this.request('/api/v1/content/process', { method: 'POST', body: { serviceId, sourceId, input, approvalId } }); }

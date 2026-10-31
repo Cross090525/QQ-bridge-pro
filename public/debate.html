@@ -1,38 +1,70 @@
 <!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>争论辅助管理</title>
 <style>body{font:16px/1.6 system-ui;background:#101720;color:#e6edf3;max-width:1000px;margin:32px auto;padding:16px}input,textarea,select,button{font:inherit;padding:8px;margin:5px;background:#1e2b3b;color:inherit;border:1px solid #52677d;border-radius:6px}input,textarea{box-sizing:border-box;max-width:100%}textarea{width:95%}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}article{padding:16px;border:1px solid #52677d;margin:16px 0;border-radius:10px}pre{white-space:pre-wrap;overflow-wrap:anywhere}label{display:inline-block}small{color:#b1c4d6}</style>
-<h1>争论辅助</h1><p>限定群、对象和议题，按证据分析。开启自动发送即授权任务有效期内直接发言，不再逐条审批；不设发送冷却或次数上限。停止或过期后任务凭据失效。</p>
+<h1>争论辅助</h1><p>限定群、对象和议题，按证据分析。开启自动发送即授权任务有效期内直接发言，不再逐条审批；争论本身不另设发送冷却或次数上限；启用统一额度后仍受相应分析和发送额度约束。停止或过期后任务凭据失效。</p>
+<article><h2>群聊唤起与启动审核</h2><p>群友发送“唤起语句 @对象 议题 | 关键词1,关键词2”（也可用 QQ 号代替 @）。只接受消息开头的完整语句；每次都需管理员批准才启动。默认关闭。</p>
+<form id="wake"><label><input id="wakeEnabled" type="checkbox">允许群聊申请</label><br><label for="wakePhrases">自定义唤起语句（每行一条，最多10条，按文字精确匹配）</label><textarea id="wakePhrases" rows="3" maxlength="410" required></textarea><br>
+<label>任务有效期（分钟）<input id="wakeMinutes" type="number" min="1" max="120" value="30" required></label><label>批准后的发送方式<select id="wakeSendMode"><option value="review">每条草稿仍需审核</option><option value="auto">任务内自动发送（无需逐条审核）</option></select></label><label><input id="wakeContext" type="checkbox">带入本群相关近期文字与媒体摘要</label><button>保存唤起设置</button></form>
+<small>设置变更会取消待审核申请。启动申请5分钟后过期，重启后失效。可在此审核，或由 ownerQQ 本人在机器人私聊发送 /debate-approve 申请编号、/debate-deny 申请编号。批准后桥接自动启动本机分析器。</small><div id="requests"></div></article>
+<h2>管理员直接创建任务</h2>
 <form id="create"><label>群号<input name="group" required pattern="[1-9][0-9]*"></label><label>关注对象 QQ<input name="target" required pattern="[1-9][0-9]*"></label><label>有效期（分钟）<input name="minutes" type="number" min="1" max="120" value="30" required></label><br>
-<label>议题<input name="topic" maxlength="300" required></label><label>关键词（逗号分隔）<input name="keywords" required></label><label>发送方式<select name="sendMode"><option value="auto">任务内自动发送（一次授权）</option><option value="review">每条草稿审批后发送</option></select></label><button>授权并创建任务</button></form>
-<p><small>只收集开启后的相关消息；任务及凭据仅保存在内存，桥接重启后失效。创建任务即授权持有任务令牌的插件读取该任务筛选出的消息。</small></p>
+<label>议题<input name="topic" maxlength="300" required></label><label>关键词（逗号分隔）<input name="keywords" required></label><label>发送方式<select name="sendMode"><option value="auto">任务内自动发送（一次授权）</option><option value="review">每条草稿审批后发送</option></select></label><label><input type="checkbox" name="includeContext" checked style="width:auto">带入本群议题相关近期背景与媒体摘要，并按当前人设表达</label><button>授权并创建任务</button></form>
+<p><small>候选事件从开启后收集；勾选背景后还可读取本群近期缓存中相关文字和媒体摘要。普通观察不会被争论任务中断。任务及凭据仅保存在内存，桥接重启后失效。创建任务即授权持有任务令牌的插件读取该任务筛选出的消息。</small></p>
 <pre id="credential"></pre><button id="download" hidden>下载本机插件任务凭据</button><button id="refresh">刷新任务与分析</button><p id="status" role="status"></p><main id="tasks"></main>
 <script>
 const token = new URL(location.href).searchParams.get('token') || localStorage.getItem('consoleToken') || '';
 if(token){localStorage.setItem('consoleToken',token);history.replaceState({},'',location.pathname);}
 const status = document.getElementById('status');
 const el = (tag,text) => { const node=document.createElement(tag); node.textContent=text; return node; };
-const names={active:'进行中',paused:'已暂停',stopped:'已结束',expired:'已到期',pending:'待确认',sending:'发送中',sent:'已发送',failed:'发送失败',denied:'已拒绝',cancelled:'已取消',skipped:'无需发言',counterargument:'反驳意见',uncertain:'待核实',concede:'认可观点',skip:'无需发言'};
+const names={stale:'上下文已变化，需重新分析',idle:'等待新消息',analyzing:'正在分析',blocked:'上下文缺失，已阻止继续',error:'异常',offline:'未连接',active:'进行中',paused:'已暂停',stopped:'已结束',expired:'已到期',pending:'待确认',sending:'发送中',sent:'已发送',failed:'发送失败',denied:'已拒绝',cancelled:'已取消',skipped:'无需发言',counterargument:'反驳意见',uncertain:'待核实',concede:'认可观点',skip:'无需发言'};
 async function api(route, body) {
   const r=await fetch(route,{method:body===undefined?'GET':'POST',headers:{'x-console-token':token,...(body===undefined?{}:{'content-type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body)});
   const data=await r.json(); if(!r.ok||!data.ok)throw Error(data.error||r.status); return data;
 }
 function run(fn){return async event=>{event?.preventDefault();try{await fn(event);status.textContent='操作完成';}catch(e){status.textContent=e.message;}};}
+let loading=false;
+let wakeLoaded=false;
+async function loadRequests(){
+  if(!wakeLoaded){const {config:c}=await api('/api/debate/wake');document.getElementById('wakeEnabled').checked=c.enabled;document.getElementById('wakePhrases').value=c.phrases.join('\n');document.getElementById('wakeMinutes').value=c.durationMinutes;document.getElementById('wakeSendMode').value=c.sendMode;document.getElementById('wakeContext').checked=c.includeContext;wakeLoaded=true;}
+  const {requests}=await api('/api/debate/requests');const container=document.getElementById('requests');container.replaceChildren();
+  const labels={pending:'待管理员审核，尚未运行',starting:'正在启动',approved:'已批准',denied:'已拒绝',cancelled:'设置已变化，已取消',expired:'已过期',failed:'启动失败，任务已撤销'};
+  for(const r of requests.slice().reverse()){
+    const box=el('article','');box.append(el('h3',r.topic),el('p',`群 ${r.key.split(':')[1]} · 申请人 ${r.requesterId} · 对象 ${r.targetId} · ${labels[r.status]||r.status}`),el('p',`关键词：${r.keywords.join('、')} · ${r.durationMinutes}分钟 · ${r.sendMode==='auto'?'批准后自动发送，无需逐条审核':'每条草稿仍需审核'} · 背景：${r.includeContext?'本群相关近期文字与媒体摘要':'仅启动后候选消息'}`),el('small',`申请 ${r.id} · 审核截止 ${new Date(r.expiresAt).toLocaleString()}`));
+    if(r.status==='pending')for(const [decision,label] of [['approve','批准并启动分析器'],['deny','拒绝启动']]){const button=el('button',label);button.onclick=run(async()=>{button.disabled=true;try{await api('/api/debate/requests/review',{requestId:r.id,decision});}finally{await load();}});box.append(button);}
+    container.append(box);
+  }
+}
+document.getElementById('wake').onsubmit=run(async()=>{
+  await api('/api/debate/wake',{enabled:document.getElementById('wakeEnabled').checked,phrases:document.getElementById('wakePhrases').value.split('\n').map(x=>x.trim()).filter(Boolean),durationMinutes:Number(document.getElementById('wakeMinutes').value),sendMode:document.getElementById('wakeSendMode').value,includeContext:document.getElementById('wakeContext').checked});await load();
+});
 async function load(){
+  if(loading)return;loading=true;try{
+  await loadRequests();
   const data=await api('/api/debate/tasks');const container=document.getElementById('tasks');container.replaceChildren();
   for(const task of data.tasks){
     const article=el('article',''); article.append(el('h2',task.topic),el('p',`群 ${task.key.split(':')[1]} · 关注 ${task.targetId} · ${names[task.status]||task.status} · ${task.sendMode==='auto'?'自动发送':'逐条审批'} · 到期 ${new Date(task.expiresAt).toLocaleString()}`));
+    const worker=task.worker||{};
+    const workerState=task.status==='active'?(names[worker.state]||worker.state||'未连接'):(names[task.status]||task.status);
+    article.append(el('p',`分析器：${worker.online?'在线':'离线'} · ${workerState}${worker.error?' · '+({context_gap:'候选消息有缺口，请结束并重建任务',analysis_failed:'模型分析失败，请查看本机worker日志',transport_failed:'请求或发送结果异常，未自动重发',quota_exhausted:'额度暂满，到期自动恢复，也可由管理员提前重置'}[worker.error]||worker.error):''} · 背景：${task.includeContext?'本群相关近期上下文':'仅任务候选消息'}`));
+    if(!worker.online&&task.status==='active')article.append(el('small',task.managedWorker?'本机分析器尚未连接或已退出；普通聊天照常观察。可暂停后恢复重启分析器，或结束任务。':'任务授权仍有效，但没有在线分析器；普通聊天照常观察。请使用已下载凭据启动worker。'));
+    if(task.needsReassessment)article.append(el('p','背景已更新，等待worker重新评估上次争点。'));
+    const state=el('details','');state.append(el('summary','查看当前争点与未解决问题'),el('pre',JSON.stringify(task.debateState||{},null,2)));article.append(state);
     for(const [action,label] of [['pause','暂停'],['resume','恢复'],['stop','结束并撤销令牌']]){const button=el('button',label);button.disabled=['stopped','expired'].includes(task.status)||(action==='pause'&&task.status==='paused')||(action==='resume'&&task.status==='active');button.onclick=run(async()=>{await api('/api/debate/control',{taskId:task.id,action});await load();});article.append(button);}
-    const drafts=await api('/api/debate/drafts?taskId='+encodeURIComponent(task.id));
+    article.append(el('small','以下显示最近20条分析。'));
+    const drafts=await api('/api/debate/drafts?taskId='+encodeURIComponent(task.id)+'&limit=20');
     for(const draft of drafts.drafts){
-      const box=el('article','');box.append(el('h3',`分析 · ${names[draft.status]||draft.status} · ${names[draft.verdict]||draft.verdict}`),el('pre',draft.analysis),el('p','发言内容：'),el('pre',draft.text),el('details',''));
+      const displayStatus=draft.status==='pending'&&(draft.contextVersion!==task.contextVersion||draft.eventVersion!==task.lastEventId)?'stale':draft.status;
+      const box=el('article','');box.append(el('h3',`分析 · ${names[displayStatus]||displayStatus} · ${names[draft.verdict]||draft.verdict}`),el('pre',draft.analysis),el('p','发言内容：'),el('pre',draft.text),el('details',''));
       const details=box.lastChild;details.append(el('summary','引用的原始消息'),el('pre',JSON.stringify(draft.evidence,null,2)));
-      if(draft.status==='pending'&&task.status==='active')for(const [decision,label]of [['approve','确认并发送该草稿'],['deny','拒绝']]){const button=el('button',label);button.onclick=run(async()=>{button.disabled=true;try{await api('/api/debate/review',{taskId:task.id,draftId:draft.id,decision});}finally{await load();}});box.append(button);}
+      if(draft.deliveredText&&draft.status!=='sent')box.append(el('p','已确认发送的部分（其余部分未完成）：'),el('pre',draft.deliveredText));
+      if(displayStatus==='pending'&&task.status==='active')for(const [decision,label]of [['approve','确认并发送该草稿'],['deny','拒绝']]){const button=el('button',label);button.onclick=run(async()=>{button.disabled=true;try{await api('/api/debate/review',{taskId:task.id,draftId:draft.id,decision});}finally{await load();}});box.append(button);}
       article.append(box);
     }container.append(article);
   }
+  }finally{loading=false;}
 }
 document.getElementById('create').onsubmit=run(async event=>{
-  const f=new FormData(event.target);const result=await api('/api/debate/tasks',{key:'group:'+f.get('group'),targetId:f.get('target'),topic:f.get('topic'),keywords:String(f.get('keywords')).split(/[,，]/).map(x=>x.trim()).filter(Boolean),durationMinutes:Number(f.get('minutes')),sendMode:f.get('sendMode')});
+  const f=new FormData(event.target);const result=await api('/api/debate/tasks',{key:'group:'+f.get('group'),targetId:f.get('target'),topic:f.get('topic'),keywords:String(f.get('keywords')).split(/[,，]/).map(x=>x.trim()).filter(Boolean),durationMinutes:Number(f.get('minutes')),sendMode:f.get('sendMode'),includeContext:f.get('includeContext')==='on'});
   document.getElementById('credential').textContent='任务已创建。下载任务凭据后，用本机争论插件启动器打开。\n凭据仅供本机插件使用，请勿发到群里；页面刷新后将无法再次下载。';await load();
   const download=document.getElementById('download');download.hidden=false;download.onclick=()=>{
     const url=URL.createObjectURL(new Blob([JSON.stringify({...result,baseUrl:location.origin},null,2)],{type:'application/json'}));
@@ -40,4 +72,5 @@ document.getElementById('create').onsubmit=run(async event=>{
   };
 });
 document.getElementById('refresh').onclick=run(load);run(load)();
+setInterval(()=>{if(!document.hidden)load().catch(e=>{status.textContent=e.message;});},3000);
 </script></html>

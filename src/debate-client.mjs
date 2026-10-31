@@ -8,7 +8,7 @@ export class DebateClient {
     this.baseUrl = url.origin; this.taskId = taskId; this.token = token; this.fetch = fetchImpl;
   }
   async request(route, body, params = {}) {
-    if (!['task', 'events', 'drafts'].includes(route)) throw new TypeError('未知争论接口');
+    if (!['task', 'events', 'drafts', 'batch', 'heartbeat'].includes(route)) throw new TypeError('未知争论接口');
     const url = new URL(`/api/v1/debate/${route}`, this.baseUrl);
     url.searchParams.set('taskId', this.taskId);
     for (const [key, value] of Object.entries(params)) if (value !== undefined) url.searchParams.set(key, value);
@@ -17,11 +17,15 @@ export class DebateClient {
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30000) });
     const data = await response.json();
     if (!response.ok || !data.ok) {
-      const error = new Error(data.error || `HTTP ${response.status}`); error.statusCode = response.status; throw error;
+      const error = new Error(data.error || `HTTP ${response.status}`); error.statusCode = response.status;
+      if (data.code === 'QUOTA_EXHAUSTED') { error.code = data.code; error.resetsAt = data.resetsAt; }
+      throw error;
     }
     return data;
   }
   task() { return this.request('task'); }
   events(after = 0) { return this.request('events', undefined, { after }); }
+  batch(workerId) { return this.request('batch', { workerId }); }
+  heartbeat(input) { return this.request('heartbeat', input); }
   submit(draft) { return this.request('drafts', draft); }
 }

@@ -24,6 +24,7 @@ import * as roleCard from '../src/role-card.js';
 import * as stateAcl from '../src/state-acl.mjs';
 import * as dualMode from '../src/core/dual-mode.mjs';
 import * as contextQuery from '../src/core/context-query.mjs';
+import { WorkingMemory, ObservationQueue, observationServices } from '../src/core/working-memory.mjs';
 import * as publicApi from '../src/core/public-api.mjs';
 import * as frameworkContent from '../src/framework/content.mjs';
 import { FrameworkMediaStore } from '../src/framework/media-store.mjs';
@@ -32,6 +33,10 @@ import * as extensionPermissionsModule from '../src/framework/permissions.mjs';
 import { MemoryProviderRuntime } from '../src/framework/memory-providers.mjs';
 import * as memoryCompat from '../src/framework/memory-compat.mjs';
 import { DebateTasks, handleDebateApi } from '../src/framework/debate.mjs';
+import { DebateRequests, normalizeDebateWake } from '../src/framework/debate-requests.mjs';
+import { ManagedDebateWorkers } from '../src/framework/debate-workers.mjs';
+import { projectDebateContext } from '../src/framework/debate-context.mjs';
+import { UsageQuotas, normalizeQuotaConfig, QUOTA_RESOURCES } from '../src/core/usage-quotas.mjs';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -45,6 +50,9 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     consoleToken: 'fixture-console-token', slang: { enabled: false }, ...config,
   }));
   if (savedState) fs.writeFileSync(path.join(temp, 'state/sessions.json'), JSON.stringify(savedState));
+  const fixtureConfig = JSON.parse(fs.readFileSync(path.join(temp, 'config.json')));
+  fixtureConfig.socialV2 = { ...fixtureConfig.socialV2, workingMemory: { enabled: false, ...fixtureConfig.socialV2?.workingMemory } };
+  fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify(fixtureConfig));
   // 额外状态文件（用于测试"启动时读到损坏/旧版文件"这类路径）。
   for (const [rel, content] of Object.entries(files)) {
     const target = path.join(temp, rel);
@@ -135,7 +143,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     buildWakePromptV2, buildWakeSnapshotV2, sendWakePromptV2, socialV2,
     refreshMode, modeAllowed, modeFor, ownerAgentToken, ownerAgentTokens, sessionPolicy, reconcileSessionPolicies, trackTurnEvent, replayPendingWakeReasonsV2,
     collectors, setupSleepTimerV2,
-    contentSources, contentServices, frameworkMedia, frameworkScope, extensionPermissions, memoryProviders, debateTasks,
+    workingMemory, workingEnabled, prepareObservationV2, observationJobs, scheduleWakeV2, usageQuotas,
+    contentSources, contentServices, frameworkMedia, frameworkScope, extensionPermissions, memoryProviders, debateTasks, debateRequests, debateWorkers,
     getInitialPrompt, setInitialPrompt, loadInitialPrompts, formatInitialPromptV2,
     initialPrompts, initialPromptMaxChars,
     extractMediaFromSegments, segmentsToText, fetchOneBotImage, fetchMediaData, resolveMediaList,
@@ -176,8 +185,10 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
-    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...dualMode, ...contextQuery, ...publicApi,
-    ...frameworkContent, FrameworkMediaStore, ContentServiceRuntime, ...extensionPermissionsModule, MemoryProviderRuntime, ...memoryCompat, DebateTasks, handleDebateApi,
+    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...dualMode, ...contextQuery, ...publicApi, WorkingMemory, ObservationQueue, observationServices,
+    ...frameworkContent, FrameworkMediaStore, ContentServiceRuntime, ...extensionPermissionsModule, MemoryProviderRuntime, ...memoryCompat, DebateTasks, handleDebateApi, projectDebateContext,
+    DebateRequests, normalizeDebateWake, ManagedDebateWorkers, spawn: () => { throw Error('fixture forbids real worker spawning'); },
+    UsageQuotas, normalizeQuotaConfig, QUOTA_RESOURCES,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),
@@ -209,6 +220,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   bridge.setPresets(['standard', 'qq-chat', 'qq-chat-v2']);
   bridge.setReady(true);
   return { ...bridge, calls, temp, async close() {
+    bridge.usageQuotas.close();
+    await bridge.debateWorkers.close();
     await bridge.contentServices.close();
     await bridge.memoryProviders.close();
     for (const timer of timers) clearTimeout(timer);

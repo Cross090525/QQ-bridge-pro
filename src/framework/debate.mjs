@@ -1,5 +1,6 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { frameworkError } from './content.mjs';
+import { selectDebateBatch, normalizeDebateState } from './debate-context.mjs';
 
 const digest = value => createHash('sha256').update(String(value)).digest('hex');
 const field = (value, name, max) => {
@@ -15,9 +16,9 @@ const cursor = value => {
 // Deliberately ephemeral: a process restart revokes every task credential and draft.
 // A task token grants only this finite API, never a conversation or console token.
 export class DebateTasks {
-  constructor({ now = Date.now, assertGroup, audit = () => {}, send } = {}) {
-    this.now = now; this.assertGroup = assertGroup; this.audit = audit; this.send = send;
-    this.tasks = new Map();
+  constructor({ now = Date.now, assertGroup, audit = () => {}, send, readContext = () => ({}), onControl = () => {}, beforeBatch = () => {} } = {}) {
+    this.now = now; this.assertGroup = assertGroup; this.audit = audit; this.send = send; this.readContext = readContext;
+    this.tasks = new Map(); this.onControl = onControl; this.beforeBatch = beforeBatch;
   }
   record(event, task, extra = {}) {
     this.audit({ event: `debate-${event}`, key: task.key, taskId: task.id, ...extra });
@@ -34,6 +35,11 @@ export class DebateTasks {
       lastEventId: task.nextEvent, oldestEventId: task.events[0]?.id ?? null,
       lastRequestSeq: task.lastRequestSeq ?? 0,
       processedThrough: task.processedThrough ?? 0,
+      protocolVersion: 2, managedWorker: task.managedWorker === true, includeContext: task.includeContext, contextVersion: this.contextVersion(task),
+      needsReassessment: !!task.lastAnalysis && task.processedThrough >= task.nextEvent && task.lastAnalysis.contextVersion !== this.contextVersion(task),
+      debateState: structuredClone(task.debateState),
+      worker: { online: task.status === 'active' && task.expiresAt > this.now() && !!task.worker && task.worker.state !== 'stopped' && this.now() - task.worker.lastSeenAt < 6000,
+        state: task.worker?.state || 'offline', lastSeenAt: task.worker?.lastSeenAt ?? null, error: task.worker?.error || '' },
       frequencyLimit: null, sendMode: task.sendMode, approvalRequired: task.sendMode !== 'auto' };
   }
   create(input, policy) {
@@ -53,8 +59,9 @@ export class DebateTasks {
     const token = randomBytes(32).toString('hex');
     const task = { id: randomBytes(16).toString('hex'), tokenHash: digest(token), key: input.key,
       targetId: String(input.targetId), topic, keywords, policy, sendMode, status: 'active', revision: 0,
+      includeContext: input.includeContext === true, batches: new Map(), debateState: { claims: [], questions: [], position: '' },
       createdAt: this.now(), expiresAt: this.now() + minutes * 60000, nextEvent: 0, events: [], drafts: new Map() };
-    this.record('created', task, { sendMode });
+    this.record('created', task, { sendMode, includeContext: task.includeContext, protocolVersion: 2 });
     this.tasks.set(task.id, task);
     return { task: this.view(task), token };
   }
@@ -73,13 +80,17 @@ export class DebateTasks {
     if (!['pause', 'resume', 'stop'].includes(action)) throw frameworkError('未知任务操作');
     if (task.status === 'stopped' || task.expiresAt <= this.now()) throw frameworkError('结束或过期的任务不能恢复', 409);
     if (action === 'resume') this.assertGroup(task.key, task.policy);
+    if ((action === 'resume' && task.status === 'active') || (action === 'pause' && task.status === 'paused')) return this.view(task);
     if (action === 'resume') this.record(action, task);
     task.revision++;
+    task.batches.clear();
     task.status = { pause: 'paused', resume: 'active', stop: 'stopped' }[action];
+    task.worker = null;
     // Pause invalidates every pending draft; resume never resurrects approvals.
     for (const draft of task.drafts.values()) if (draft.status === 'pending') draft.status = 'cancelled';
     if (action === 'stop') { task.events = []; task.tokenHash = ''; }
     // Audit failure must never prevent an administrator from revoking a task.
+    this.onControl(task, action);
     if (action !== 'resume') this.record(action, task);
     return this.view(task);
   }
@@ -100,6 +111,7 @@ export class DebateTasks {
       task.events.push({ id: ++task.nextEvent, messageId: String(msg.messageId), userId: String(msg.userId),
         sender: String(msg.sender ?? '').slice(0, 100), text, reasons, time: this.now() });
       if (task.events.length > 200) task.events.shift();
+      for (const draft of task.drafts.values()) if (draft.status === 'pending') draft.status = 'stale';
     }
     return matched;
   }
@@ -110,6 +122,44 @@ export class DebateTasks {
     if (task.events.length && after < task.events[0].id - 1) throw frameworkError('事件已淘汰，请从 oldestEventId-1 重新读取', 409);
     return task.events.filter(event => event.id > after).map(event => ({ ...event, reasons: [...event.reasons] }));
   }
+  contextVersion(task) { return digest(JSON.stringify(this.readContext(task))); }
+  heartbeat(task, input) {
+    this.live(task);
+    if (!/^[a-f0-9-]{16,64}$/.test(input.workerId ?? '') || !Number.isSafeInteger(input.sequence) || input.sequence < 1
+      || !['idle', 'analyzing', 'blocked', 'error', 'stopped'].includes(input.state)
+      || !['', 'context_gap', 'analysis_failed', 'transport_failed', 'quota_exhausted'].includes(input.error ?? '')) throw frameworkError('worker状态无效');
+    if (task.worker && task.worker.id !== input.workerId && this.now() - task.worker.lastSeenAt < 6000 && task.worker.state !== 'stopped') throw frameworkError('已有另一个worker在线', 409);
+    if (task.worker?.id === input.workerId && input.sequence <= task.worker.sequence) return this.view(task);
+    task.worker = { id: input.workerId, sequence: input.sequence, state: input.state, error: input.error || '', lastSeenAt: this.now() };
+    return this.view(task);
+  }
+  batch(task, workerId) {
+    this.live(task);
+    if (task.worker && this.now() - task.worker.lastSeenAt < 6000 && task.worker.state !== 'stopped' && task.worker.id !== workerId) throw frameworkError('分析批次属于在线worker', 409);
+    const context = this.readContext(task), contextVersion = digest(JSON.stringify(context));
+    for (const draft of task.drafts.values()) if (draft.status === 'pending'
+      && (draft.eventVersion !== task.nextEvent || draft.contextVersion !== contextVersion)) draft.status = 'stale';
+    const events = this.events(task, task.processedThrough || 0);
+    const refresh = !events.length && !!task.lastAnalysis && task.lastAnalysis.contextVersion !== contextVersion;
+    const messages = refresh ? structuredClone(task.lastAnalysis.messages) : selectDebateBatch(events);
+    if (!messages.length) return null;
+    this.beforeBatch(task);
+    const batch = { id: randomBytes(16).toString('hex'), taskRevision: task.revision, eventVersion: task.nextEvent,
+      contextVersion, throughEventId: messages.at(-1).id, hasMore: messages.at(-1).id < task.nextEvent,
+      messages, context, refresh, debateState: structuredClone(task.debateState), workerId,
+      recentResponses: [...task.drafts.values()].slice(-5).map(d => ({ text: d.text, verdict: d.verdict, status: d.status,
+        deliveredText: d.deliveredText || '', partial: Boolean(d.deliveredText) && d.status !== 'sent' })),
+      expiresAt: Math.min(task.expiresAt, this.now() + 300000) };
+    for (const [id, b] of task.batches) if (b.expiresAt <= this.now()) task.batches.delete(id);
+    while (task.batches.size >= 8) task.batches.delete(task.batches.keys().next().value);
+    task.batches.set(batch.id, batch);
+    return structuredClone(batch);
+  }
+  fresh(task, draft) {
+    if (draft.eventVersion !== task.nextEvent || draft.contextVersion !== this.contextVersion(task)) {
+      draft.status = 'stale'; throw frameworkError('争论上下文已变化，旧草稿必须重新分析', 409);
+    }
+  }
   async submit(task, input) {
     this.live(task);
     if (input.taskRevision !== task.revision) throw frameworkError('任务授权版本已变化，请重新读取任务', 403);
@@ -119,12 +169,12 @@ export class DebateTasks {
     const verdict = input.verdict;
     if (!['counterargument', 'uncertain', 'concede', 'skip'].includes(verdict)) throw frameworkError('verdict 无效');
     if (!Array.isArray(input.evidenceIds) || input.evidenceIds.length < 1 || input.evidenceIds.length > 12
-      || input.evidenceIds.some(id => !Number.isSafeInteger(id) || !task.events.some(e => e.id === id))) throw frameworkError('须引用当前任务中实际收到的 evidenceIds');
+      || input.evidenceIds.some(id => !Number.isSafeInteger(id) || id < 1)) throw frameworkError('须引用当前任务中实际收到的 evidenceIds');
     const through = input.throughEventId ?? Math.max(...input.evidenceIds);
-    if (!Number.isSafeInteger(through) || through < Math.max(...input.evidenceIds) || !task.events.some(event => event.id === through)) throw frameworkError('throughEventId 须为已收到且不早于引用的事件');
+    if (!Number.isSafeInteger(through) || through < Math.max(...input.evidenceIds)) throw frameworkError('throughEventId须为已收到且不早于evidenceIds引用的事件');
     // Idempotency prevents a worker retry from duplicating a reviewed draft.
     const requestId = field(input.requestId, 'requestId', 100);
-    const fingerprint = digest(JSON.stringify([text, analysis, verdict, input.evidenceIds, input.requestSeq, through]));
+    const fingerprint = digest(JSON.stringify([text, analysis, verdict, input.evidenceIds, input.requestSeq, through, input.batchId, input.state]));
     const existing = [...task.drafts.values()].find(d => d.requestId === requestId);
     if (existing) {
       if (existing.fingerprint !== fingerprint) throw frameworkError('requestId 已绑定其他草稿', 409);
@@ -133,16 +183,37 @@ export class DebateTasks {
     // A monotonic request sequence bounds replay state without a lifetime send
     // quota. Evicting old drafts must never allow an old request to send again.
     if (!Number.isSafeInteger(input.requestSeq) || input.requestSeq < 1 || input.requestSeq <= (task.lastRequestSeq ?? 0)) throw frameworkError('requestSeq 须递增，旧请求不能重放', 409);
+    const batch = task.batches.get(input.batchId);
+    if (!batch || batch.taskRevision !== task.revision || batch.expiresAt <= this.now()) throw frameworkError('须先领取当前授权版本的分析批次', 409);
+    if (batch.workerId && (!task.worker || task.worker.id !== batch.workerId || this.now() - task.worker.lastSeenAt >= 6000
+      || ['stopped', 'error', 'blocked'].includes(task.worker.state))) throw frameworkError('worker授权已失效', 403);
+    if (through !== batch.throughEventId || through <= (task.processedThrough || 0)
+      && (!batch.refresh || batch.contextVersion === task.lastAnalysis?.contextVersion)
+      || input.evidenceIds.some(id => !batch.messages.some(m => m.id === id))) throw frameworkError('游标和evidenceIds必须限定在实际提供的分析批次', 409);
+    if (verdict !== 'skip') {
+      this.fresh(task, { eventVersion: batch.eventVersion, contextVersion: batch.contextVersion });
+      if (batch.hasMore) throw frameworkError('尚有未分析前文，请先整理并选择skip', 409);
+    }
+    let nextState = task.debateState;
+    if (input.state !== undefined) {
+      const allowed = new Set([...batch.messages.map(m => m.id), ...['claims', 'questions'].flatMap(k => task.debateState[k].flatMap(x => x.evidenceIds))]);
+      try { nextState = normalizeDebateState(input.state, allowed); } catch (error) { throw frameworkError(error.message); }
+    }
+    const privateText = JSON.stringify([analysis, nextState]);
+    if ([...privateText.matchAll(/[a-f0-9]{64}/g)].some(match => [...this.tasks.values()].some(t => t.tokenHash && digest(match[0]) === t.tokenHash))) throw frameworkError('分析或争点状态包含任务凭据，拒绝保存', 403);
     if (task.drafts.size >= 100) {
       const old = [...task.drafts.values()].find(d => !['pending', 'sending'].includes(d.status));
       if (!old) throw frameworkError('待审草稿存储已满，请管理员处理', 409);
       task.drafts.delete(old.id);
     }
     const draft = { id: randomBytes(16).toString('hex'), requestId, fingerprint, text, analysis, verdict,
-      evidence: input.evidenceIds.map(id => structuredClone(task.events.find(e => e.id === id))),
-      revision: task.revision, status: 'pending', createdAt: this.now(), expiresAt: Math.min(task.expiresAt, this.now() + 300000) };
-    this.record('draft-submitted', task, { draftId: draft.id });
+      evidence: input.evidenceIds.map(id => structuredClone(batch.messages.find(e => e.id === id))),
+      revision: task.revision, batchId: batch.id, workerId: batch.workerId, eventVersion: batch.eventVersion, contextVersion: batch.contextVersion, status: 'pending', createdAt: this.now(), expiresAt: Math.min(task.expiresAt, this.now() + 300000) };
+    this.record('draft-submitted', task, { draftId: draft.id, batchId: batch.id, throughEventId: through,
+      eventVersion: batch.eventVersion, refresh: batch.refresh });
     task.lastRequestSeq = input.requestSeq;
+    task.debateState = nextState;
+    task.lastAnalysis = { messages: structuredClone(batch.messages), contextVersion: batch.contextVersion };
     task.processedThrough = Math.max(task.processedThrough ?? 0, through);
     task.drafts.set(draft.id, draft);
     if (verdict === 'skip') { draft.status = 'skipped'; return structuredClone(draft); }
@@ -155,37 +226,53 @@ export class DebateTasks {
     if (!draft || draft.status !== 'pending' || draft.revision !== task.revision || draft.expiresAt <= this.now()) throw frameworkError('草稿不存在、已处理或已过期', 409);
     if (!['approve', 'deny'].includes(decision)) throw frameworkError('审批决定无效');
     if (automatic && task.sendMode !== 'auto') throw frameworkError('任务未授权自动发送', 403);
+    if (decision === 'approve') this.fresh(task, draft);
     this.record(automatic ? 'draft-auto-authorized' : `draft-${decision}`, task, { draftId });
     draft.status = decision === 'deny' ? 'denied' : 'sending';
     if (decision === 'deny') return structuredClone(draft);
     const revision = task.revision;
     const assertLive = () => {
       this.live(task);
+      this.fresh(task, draft);
+      if (automatic && draft.workerId && (task.worker?.id !== draft.workerId || this.now() - task.worker.lastSeenAt >= 6000
+        || ['stopped', 'error', 'blocked'].includes(task.worker.state))) throw frameworkError('worker授权已失效', 403);
       if (revision !== task.revision || draft.expiresAt <= this.now()) throw frameworkError('审批发送已撤销或过期', 403);
     };
     try {
       assertLive();
-      await this.send(task.key, draft.text, assertLive);
+      await this.send(task.key, draft.text, assertLive, { taskId: task.id });
       draft.status = 'sent';
+      draft.deliveredText = draft.text;
       this.record('draft-sent', task, { draftId });
     } catch (error) {
       // Never retry an ambiguous transport failure automatically.
-      if (draft.status !== 'sent') draft.status = 'failed';
+      if (Array.isArray(error.sent)) draft.deliveredText = error.sent.map(text => String(text)).join('\n').slice(0, 6000);
+      if (!['sent', 'stale'].includes(draft.status)) draft.status = 'failed';
       throw error;
     }
     return structuredClone(draft);
   }
 }
 
-export async function handleDebateApi({ req, res, url, readBody, sendJson, tasks, admin }) {
+export async function handleDebateApi({ req, res, url, readBody, sendJson, tasks, admin, requests, saveWakeConfig }) {
   const external = url.pathname.startsWith('/api/v1/debate/');
   if (!external && !admin) throw frameworkError('争论任务管理仅供管理员控制台使用', 403);
   if (!external) {
+    if (requests && req.method === 'GET' && url.pathname === '/api/debate/wake') return sendJson({ ok: true, config: structuredClone(requests.config) });
+    if (requests && req.method === 'POST' && url.pathname === '/api/debate/wake') return sendJson({ ok: true, config: await saveWakeConfig(await readBody()) });
+    if (requests && req.method === 'GET' && url.pathname === '/api/debate/requests') return sendJson({ ok: true, requests: requests.list() });
+    if (requests && req.method === 'POST' && url.pathname === '/api/debate/requests/review') {
+      const body = await readBody(); return sendJson({ ok: true, request: await requests.decide(body.requestId, body.decision) });
+    }
     if (req.method === 'GET' && url.pathname === '/api/debate/tasks') return sendJson({ ok: true, tasks: [...tasks.tasks.values()].map(t => tasks.view(t)) });
     if (req.method === 'POST' && url.pathname === '/api/debate/tasks') return sendJson({ ok: true, ...tasks.create(await readBody()) });
     const body = req.method === 'POST' ? await readBody() : null;
     if (req.method === 'POST' && url.pathname === '/api/debate/control') return sendJson({ ok: true, task: tasks.control(body.taskId, body.action) });
-    if (req.method === 'GET' && url.pathname === '/api/debate/drafts') return sendJson({ ok: true, drafts: [...tasks.get(url.searchParams.get('taskId')).drafts.values()] });
+    if (req.method === 'GET' && url.pathname === '/api/debate/drafts') {
+      const limit = Number(url.searchParams.get('limit') ?? 100);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw frameworkError('limit须为1–100');
+      return sendJson({ ok: true, drafts: [...tasks.get(url.searchParams.get('taskId')).drafts.values()].slice(-limit) });
+    }
     if (req.method === 'POST' && url.pathname === '/api/debate/review') return sendJson({ ok: true, draft: await tasks.review(body.taskId, body.draftId, body.decision) });
     throw frameworkError('未知争论管理接口', 404);
   }
@@ -198,6 +285,12 @@ export async function handleDebateApi({ req, res, url, readBody, sendJson, tasks
   if (req.method === 'GET' && url.pathname === '/api/v1/debate/events') {
     const after = url.searchParams.get('after') ?? 0;
     return sendJson({ ok: true, events: tasks.events(task, after), task: tasks.view(task) });
+  }
+  if (req.method === 'POST' && ['/api/v1/debate/batch', '/api/v1/debate/heartbeat'].includes(url.pathname)) {
+    const body = await readBody(); tasks.authenticate(id, token);
+    if (body.key !== undefined || body.taskId !== undefined) throw frameworkError('任务范围只能由凭据确定', 403);
+    if (url.pathname.endsWith('/heartbeat')) return sendJson({ ok: true, task: tasks.heartbeat(task, body) });
+    return sendJson({ ok: true, batch: tasks.batch(task, body.workerId), task: tasks.view(task) });
   }
   if (req.method === 'POST' && url.pathname === '/api/v1/debate/drafts') {
     const body = await readBody();

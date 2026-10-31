@@ -313,6 +313,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_process_content: 'contentServices',
   qq_send_content: 'contentSend',
   qq_context_query: 'contextQuery',
+  qq_working_memory: 'contextQuery',
   qq_get_prompt: 'getPrompt',
   qq_get_unread_messages: 'getUnread',
   qq_get_recent_messages: 'getRecent',
@@ -947,7 +948,20 @@ server.tool('qq_memory', '通过开放记忆接口调用插件。query: query/me
   } catch (error) { return { content: [{ type: 'text', text: `记忆插件调用失败：${error.message}` }], isError: true }; }
 });
 
-server.tool('qq_content_services', '按需发现当前已配置的内容服务，可按消息的 sourceId 筛选。语音转写、视频/链接理解、图片识别或语音合成都通过服务处理；不自动运行服务。', {
+server.tool('qq_working_memory', '读取或更新当前群的实时工作记忆。read返回snapshot，input可用query关键词或messageId=messages.id回看原文；update须带revision。topics/facts/questions/uncertainties为完整替换列表，每项{text,status:active|dormant|resolved,certainty:reported|confirmed|inferred,sources:实际展示的messages.id数组}。media为[{sourceId,summary}]，仅总结已看到证据的媒体。decision为{action:observe|need_context|reply,note:简短依据,sources}，不保存完整思考；reply不自动发送。不被@不等于无关，媒体未知时先补信息。', {
+  key: z.string(), token: z.string().min(1), operation: z.enum(['read', 'update']),
+  input: z.record(z.string(), z.unknown()).optional(),
+}, async ({ key, token, operation, input }) => {
+  try {
+    const search = new URLSearchParams({ key, ...(input?.query ? { query: input.query } : {}), ...(input?.messageId ? { messageId: input.messageId } : {}) });
+    const result = await agentApi('/api/v1/working/context' + (operation === 'read' ? '?' + search : ''), {
+      ...(operation === 'update' ? { method: 'POST', body: JSON.stringify({ ...input, key }) } : {}), headers: { 'x-agent-token': token },
+    });
+    return { content: [{ type: 'text', text: serializeModelData(result) }] };
+  } catch (error) { return { isError: true, content: [{ type: 'text', text: `实时记忆操作失败：${error.message}` }] }; }
+});
+
+server.tool('qq_content_services' , '按需发现当前已配置的内容服务，可按消息的 sourceId 筛选。语音转写、视频/链接理解、图片识别或语音合成都通过服务处理；不自动运行服务。', {
   key: z.string(), token: z.string().min(1), sourceId: z.string().optional(),
 }, async ({ key, token, sourceId }) => {
   try {

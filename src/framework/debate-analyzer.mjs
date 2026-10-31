@@ -1,18 +1,13 @@
+import { selectDebateBatch, normalizeDebateState } from './debate-context.mjs';
 import { NodeApiClient, unwrap, createTurnCollector, isLoopbackBase } from '../dsh-client.js';
 
-export function buildDebateInput(task, events, previousResponses = []) {
+export function buildDebateInput(task, events, previousResponses = [], { context = {}, debateState = {}, hasMore = false } = {}) {
   if (!events.length) throw new Error('没有可分析的消息');
-  const selected = [];
-  let chars = 0;
-  for (const event of [...events].reverse()) {
-    const item = { id: event.id, userId: event.userId, text: String(event.text).slice(0, 2000), reasons: event.reasons };
-    const size = JSON.stringify(item).length;
-    if (chars + size > 24000 || selected.length >= 20) break;
-    selected.unshift(item); chars += size;
-  }
-  // Never serialize task credentials, transport URLs, local config or full state.
-  return { topic: task.topic, targetId: task.targetId, messages: selected,
-    previousResponses: previousResponses.slice(-5).map(item => ({ text: String(item.text ?? '').slice(0, 1000), verdict: item.verdict, status: item.status })) };
+  const messages = selectDebateBatch(events);
+  const shared = Object.fromEntries(['messages', 'topics', 'media', 'recentReplies'].filter(k => context[k] !== undefined).map(k => [k, context[k]]));
+  return { phase: 'analysis', topic: task.topic, targetId: task.targetId, messages, context: shared, debateState, hasMore,
+    previousResponses: previousResponses.slice(-5).map(item => ({ text: String(item.text ?? '').slice(0, 1000), verdict: item.verdict, status: item.status,
+      deliveredText: String(item.deliveredText || '').slice(0, 1500), partial: item.partial === true })) };
 }
 
 export function parseDebateOutput(text, input) {
@@ -23,7 +18,12 @@ export function parseDebateOutput(text, input) {
       || !['counterargument', 'uncertain', 'concede', 'skip'].includes(result.verdict)
       || !Array.isArray(result.evidenceIds) || !result.evidenceIds.length || result.evidenceIds.length > 12
       || result.evidenceIds.some(id => !Number.isSafeInteger(id) || !input.messages.some(message => message.id === id))) throw new Error('分析结果缺少有效正文、分析或原文引用');
-  return { text: result.text, analysis: result.analysis, verdict: result.verdict, evidenceIds: result.evidenceIds };
+  let state;
+  if (result.state !== undefined) {
+    const allowed = new Set([...input.messages.map(m => m.id), ...['claims', 'questions'].flatMap(k => (input.debateState?.[k] || []).flatMap(x => x.evidenceIds))]);
+    state = normalizeDebateState(result.state, allowed);
+  }
+  return { text: result.text, analysis: result.analysis, verdict: result.verdict, evidenceIds: result.evidenceIds, ...(state ? { state } : {}) };
 }
 
 export class DshDebateAnalyzer {
@@ -33,8 +33,16 @@ export class DshDebateAnalyzer {
     this.api = api ?? new NodeApiClient(dsh.baseUrl || 'http://127.0.0.1:3080', 30000, {
       token: dsh.authToken || '', tokenExplicit: !!dsh.authToken, header: dsh.authHeader, prefix: dsh.authPrefix });
   }
-  async analyze(task, events, { signal, timeoutMs = 120000, previousResponses = [] } = {}) {
-    const input = buildDebateInput(task, events, previousResponses);
+  async analyze(task, events, { signal, timeoutMs = 120000, previousResponses = [], context = {}, debateState = {}, hasMore = false } = {}) {
+    const input = buildDebateInput(task, events, previousResponses, { context, debateState, hasMore });
+    const result = await this.run(input, { signal, timeoutMs });
+    if (hasMore) return { ...result, verdict: 'skip', text: '' };
+    if (result.verdict === 'skip' || !context.persona) return result;
+    const expressed = await this.run({ ...input, phase: 'expression', context: { ...input.context, persona: context.persona }, draft: result }, { signal, timeoutMs });
+    if (expressed.verdict !== result.verdict || JSON.stringify(expressed.evidenceIds) !== JSON.stringify(result.evidenceIds)) throw new Error('人设表达改变了结论或引用，拒绝发送');
+    return { ...result, text: expressed.text };
+  }
+  async run(input, { signal, timeoutMs = 120000 } = {}) {
     const controller = new AbortController();
     const abort = () => controller.abort(signal?.reason ?? new Error('任务已撤销'));
     const timer = setTimeout(() => controller.abort(new Error('分析超时')), timeoutMs);

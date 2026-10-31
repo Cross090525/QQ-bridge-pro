@@ -1,0 +1,48 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>用量与额度</title>
+<style>body{font:16px/1.65 system-ui;background:#101720;color:#e6edf3;max-width:1100px;margin:30px auto;padding:16px}input,select,button{font:inherit;background:#1e2b3b;color:inherit;border:1px solid #52677d;border-radius:6px;padding:8px;margin:4px;max-width:95%;box-sizing:border-box}button{cursor:pointer}article{border:1px solid #52677d;border-radius:10px;padding:18px;margin:16px 0}small{color:#b1c4d6}label{display:inline-block}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:10px;border-bottom:1px solid #52677d;overflow-wrap:anywhere}.scroll{overflow:auto}#rules input{width:140px}button:disabled{opacity:.5}</style>
+<h1>用量与额度</h1><p>在指定时间窗口内累计读取或调用次数。达到上限时暂缓对应能力并通知管理员；当前窗口结束后自动恢复。也可以由管理员批准一次提前重置，用量归零，从批准时间开始新窗口。</p>
+<form id="config"><label><input type="checkbox" id="enabled">启用用量审核</label><label><input type="checkbox" id="inherit">继承现有次数限制，达限后等待窗口自动恢复，可申请提前重置</label><p><small>继承范围包括原有每分钟/每小时的扩展调用、唤醒、文字与媒体发送、语音发送、表情收藏、黑话提交和反馈次数。原有数值仍在相应控制台设置中调整；不勾选时，次数限制只采用下方自定义规则。现有唤醒限制可能较低，请一并调整。</small></p>
+<div class="scroll"><table><thead><tr><th>资源</th><th>范围</th><th>指定会话</th><th>次数</th><th>窗口（分钟）</th><th>操作</th></tr></thead><tbody id="rules"></tbody></table></div><button type="button" id="add">添加额度</button><button type="submit">保存额度配置</button></form>
+<p><small>全局额度由所有会话共用；每会话额度为各群/私聊分别计数；指定会话仅约束所填群或私聊。多条规则同时生效，任何一条暂满都会拦截该资源。按实际读取/调用尝试预占次数，失败不退还；视频抽帧不按帧数计算，同一自动准备任务的抽帧和转写共用一次视频额度。权限审批未通过、缓存命中和纯文本观察不占媒体读取额度。单次大小、时长和并发等处理边界照常生效。</small></p>
+<p id="status" role="status"></p><button id="refresh">刷新用量</button><main id="usage"></main><datalist id="resourceOptions"></datalist>
+<script>
+const token=new URL(location.href).searchParams.get('token')||localStorage.getItem('consoleToken')||'';
+if(token){localStorage.setItem('consoleToken',token);history.replaceState({},'',location.pathname);}
+const labels={'media.image':'图片/表情读取','media.video':'视频读取','media.audio':'语音识别','model.wake':'普通模型唤醒','debate.analysis':'争论分析批次','send.message':'文字/图片/表情发送','send.voice':'语音发送','sticker.collect':'表情收藏','slang.submit':'黑话提交','feedback.submit':'反馈提交'};
+const el=(tag,text)=>{const n=document.createElement(tag);n.textContent=text;return n;};
+const status=document.getElementById('status');let loaded=false,loading=false;
+async function api(route,body){const r=await fetch(route,{method:body===undefined?'GET':'POST',headers:{'x-console-token':token,...(body===undefined?{}:{'content-type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body)});const d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||r.status);return d;}
+function run(fn){return async e=>{e?.preventDefault();try{await fn(e);status.textContent='操作完成';}catch(error){status.textContent=error.message;}};}
+function addRule(rule={id:'q-'+crypto.randomUUID().replaceAll('-',''),resource:'media.image',scope:'global',limit:10,windowMinutes:60}){
+  const row=document.createElement('tr');row.dataset.id=rule.id;
+  for(const field of ['resource','scope','key','limit','windowMinutes']){
+    const cell=document.createElement('td');let input;
+    if(field==='scope'){input=document.createElement('select');for(const [value,label]of [['global','全局共用'],['conversation','各会话分别'],['exact','指定会话']]){const option=el('option',label);option.value=value;input.append(option);}}
+    else {input=document.createElement('input');input.type=['limit','windowMinutes'].includes(field)?'number':'text';if(input.type==='number'){input.min='1';input.max=field==='limit'?'1000000':'43200';}if(field==='resource')input.setAttribute('list','resourceOptions');}
+    input.dataset.field=field;input.setAttribute('aria-label',({resource:'资源',scope:'范围',key:'指定会话',limit:'次数',windowMinutes:'窗口分钟'})[field]);input.value=rule[field]??'';input.required=field!=='key';cell.append(input);row.append(cell);
+  }
+  const scope=row.querySelector('[data-field=scope]'),key=row.querySelector('[data-field=key]');key.placeholder='group:群号';
+  function scopeChanged(){key.disabled=scope.value!=='exact';key.required=!key.disabled;}scope.onchange=scopeChanged;scopeChanged();
+  const cell=document.createElement('td'),remove=el('button','移除');remove.type='button';remove.onclick=()=>row.remove();cell.append(remove);row.append(cell);document.getElementById('rules').append(row);
+}
+async function load(){if(loading)return;loading=true;try{
+  const data=await api('/api/quotas/status');
+  if(!loaded){document.getElementById('enabled').checked=data.config.enabled;document.getElementById('inherit').checked=data.config.includeExisting;data.config.rules.forEach(addRule);loaded=true;
+    const list=document.getElementById('resourceOptions');for(const id of data.resources){const option=el('option',labels[id]||id);option.value=id;list.append(option);}}
+  const container=document.getElementById('usage');container.replaceChildren();
+  if(!data.config.enabled)container.append(el('p','用量审核当前关闭。保存配置并启用后开始按额度预占次数。'));
+  if(!data.buckets.length)container.append(el('p','尚无计数。'));
+  for(const b of data.buckets.slice().sort((a,b)=>Number(b.blocked)-Number(a.blocked))){
+    const article=el('article','');article.append(el('h2',labels[b.resource]||b.resource),el('p',`${b.key==='*'?'全局共用':b.key} · ${b.used}/${b.limit} 次 · ${b.windowMs/60000}分钟 · ${b.blocked?'额度暂满':'可用'}`),el('small',`${b.builtin?'继承现有次数限制':'自定义规则 '+b.ruleId} · 窗口开始 ${new Date(b.windowStart).toLocaleString()} · 恢复时间 ${new Date(b.resetsAt).toLocaleString()} · 剩余 ${Math.ceil(b.remainingMs/60000)} 分钟`));
+    if(b.blocked){article.append(el('p',`申请 ${b.requestId} · ${b.decision==='denied'?'已拒绝提前重置':'待审核提前重置'}。到期自动恢复；批准仅提前重置此项额度，其他额度仍独立生效。`));
+      if(b.decision==='pending')for(const[decision,label]of [['approve','批准一次提前重置'],['deny','拒绝提前重置']]){const button=el('button',label);button.onclick=run(async()=>{button.disabled=true;try{await api('/api/quotas/review',{requestId:b.requestId,decision});}finally{await load();}});article.append(button);}
+      if(b.decision==='denied'){const button=el('button','重新提交重置申请');button.onclick=run(async()=>{await api('/api/quotas/request',{bucketId:b.id});await load();});article.append(button);}
+    }container.append(article);
+  }
+}finally{loading=false;}}
+document.getElementById('add').onclick=()=>addRule();document.getElementById('refresh').onclick=run(load);
+document.getElementById('config').onsubmit=run(async()=>{
+  const rules=[...document.querySelectorAll('#rules tr')].map(row=>{const r={id:row.dataset.id};for(const input of row.querySelectorAll('[data-field]'))if(!input.disabled)r[input.dataset.field]=input.type==='number'?Number(input.value):input.value.trim();return r;});
+  await api('/api/quotas/config',{enabled:document.getElementById('enabled').checked,includeExisting:document.getElementById('inherit').checked,rules});await load();
+});run(load)();setInterval(()=>{if(!document.hidden)load().catch(e=>status.textContent=e.message);},3000);
+</script></html>

@@ -147,9 +147,10 @@ export class ExtensionPermissions {
     }
     const usageId = `${key}\0${capability}`;
     const times = this.usage.get(usageId) ?? [];
-    if (times.filter(time => time > this.now() - 60000).length >= rule.maxCallsPerMinute || times.length >= rule.maxCallsPerHour) throw frameworkError('扩展调用次数超过授权额度', 429);
+    if (!this.quotas?.enabled && (times.filter(time => time > this.now() - 60000).length >= rule.maxCallsPerMinute || times.length >= rule.maxCallsPerHour)) throw frameworkError('扩展调用次数超过授权额度', 429);
     if (this.usage.size >= 4096 && !this.usage.has(usageId)) throw frameworkError('扩展配额容量已满', 429);
     check();
+    this.quotas?.consume(key, `extension.${capability}`, { legacy: [[60000, rule.maxCallsPerMinute], [3600000, rule.maxCallsPerHour]] });
     this.record({ key, capability, requestHash, requestId: approval?.requestId, event: 'started', dataScopes,
       destinationHash: permissionDigest(manifest.destination ?? '') });
     // No await between checking and consuming: concurrent retries cannot double spend.
