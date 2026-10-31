@@ -26,11 +26,15 @@ try {
   await page.locator('[data-view="social-v2"]').first().click();
   const panel = page.locator('#workingMemoryPanel');
   for (const d of await panel.locator('xpath=ancestor-or-self::details').all()) if (await d.getAttribute('open') === null) await d.locator(':scope > summary').click();
-  await page.locator('#workingMemoryKey').fill('group:456');
+  await page.locator('#workingMemoryKey').fill('');
+  await page.locator('#workingMemoryLoad').click();
+  await page.locator('#workingMemoryMsg').filter({ hasText: '请输入群号' }).waitFor();
+  await page.locator('#workingMemoryKey').fill('456');
   await page.locator('#workingMemoryLoad').click();
   await page.waitForFunction(() => document.querySelector('#workingMemoryOutput').textContent.includes('讨论剧情'));
   assert.equal(await page.locator('#workingMemoryOutput img').count(), 0);
   assert.ok((await page.locator('#workingMemoryOutput').textContent()).includes('<img src=x'));
+  assert.equal(await page.locator('#workingMemoryKey').inputValue(), 'group:456');
   assert.equal(h.workingMemory.receipts.size, 0, 'admin preview is not a model visibility receipt');
   for (const enabled of [false, true]) {
     await page.locator('#workingMemoryEnabled').setChecked(enabled);

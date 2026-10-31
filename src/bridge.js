@@ -3988,7 +3988,8 @@ async function main() {
         if (routing() && url.pathname.startsWith('/api/socialV2/') && !(frameworkRoute && ownerRequest())) {
           const body = req.method === 'GET' ? {} : await readBody();
           const target = body.key ?? url.searchParams.get('key');
-          if (target && (!canonicalV2Key(target) || modeFor(canonicalV2Key(target)) !== 'reserved2')) {
+          if (target && !canonicalV2Key(target)) { sendJson({ ok: false, error: '会话格式无效，请使用 group:群号 或 private:QQ号' }, 400); return; }
+          if (target && modeFor(canonicalV2Key(target)) !== 'reserved2') {
             sendJson({ ok: false, error: '管理员任务会话不使用二代仿真状态' }, 403); return;
           }
         }

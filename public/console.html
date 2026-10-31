@@ -2233,7 +2233,7 @@ button:active:not(:disabled) {
 <details class="settings-group" id="workingMemoryPanel"><summary>实时工作记忆</summary><div class="settings-content">
 <p class="meta">持续理解近期聊天、媒体与话题，再决定是否发言。每个群独立保存；长期记忆仍使用下方提供者。</p>
 <div class="row"><label style="display:flex;align-items:center;gap:8px;flex:1;width:auto"><input type="checkbox" id="workingMemoryEnabled" style="width:auto;flex:none"> 自动观察与实时工作记忆</label><button id="workingMemorySave" class="small">保存观察设置</button></div>
-<div class="row"><input id="workingMemoryKey" type="text" placeholder="group:群号" style="flex:1"><button id="workingMemoryLoad" class="small">查看当前记忆</button><span class="meta" id="workingMemoryMsg"></span></div>
+<div class="row"><input id="workingMemoryKey" type="text" placeholder="直接输入群号，或 group:群号 / private:QQ号" style="flex:1"><button id="workingMemoryLoad" class="small">查看当前记忆</button><span class="meta" id="workingMemoryMsg"></span></div>
 <div id="workingMemorySummary" style="white-space:pre-wrap">选择会话并查看当前话题与参与状态。</div>
 <details><summary>查看来源与完整快照</summary><pre id="workingMemoryOutput">（尚未加载）</pre></details>
 </div></details>
@@ -3707,8 +3707,14 @@ document.getElementById('workingMemorySave').addEventListener('click', async () 
   document.getElementById('workingMemoryMsg').textContent = r.ok ? '已保存，下批消息生效' : (r.error || '保存失败');
 });
 document.getElementById('workingMemoryLoad').addEventListener('click', async () => {
-  const key = document.getElementById('workingMemoryKey').value.trim(); if (!key) return;
+  const input = document.getElementById('workingMemoryKey'), button = document.getElementById('workingMemoryLoad'), msg = document.getElementById('workingMemoryMsg');
+  let key = input.value.trim() || document.getElementById('v2SessionSelect').value;
+  if (/^[1-9]\d*$/.test(key)) key = 'group:' + key;
+  if (!/^(group|private):[1-9]\d*$/.test(key)) { msg.textContent = '请输入群号或选择会话；私聊请填写 private:QQ号'; msg.className = 'meta err'; return; }
+  input.value = key; button.disabled = true; msg.textContent = '正在读取…'; msg.className = 'meta';
+  try {
   const r = await api('/api/socialV2/working-memory?key=' + encodeURIComponent(key));
+  if (!r.ok) throw new Error(r.error || '读取失败');
   document.getElementById('workingMemoryOutput').textContent = JSON.stringify(r.snapshot || r, null, 2);
   const s = r.snapshot;
   const actions = { observe: '继续观察', need_context: '需要补充信息', reply: '准备发言（是否实际发送以聊天记录为准）' };
@@ -3719,6 +3725,9 @@ document.getElementById('workingMemoryLoad').addEventListener('click', async () 
       '待判断的新消息：' + s.pendingCount + ' 条',
       '上次决策：' + (actions[s.decision?.action] || '尚未判断') + (s.decision?.note ? '，' + s.decision.note : '')].join('\n')
     : (r.error || '无法读取当前记忆');
+  msg.textContent = '已加载 ' + key;
+  } catch (error) { msg.textContent = error.message || '读取失败，请重试'; msg.className = 'meta err'; }
+  finally { button.disabled = false; }
 });
 loadWorkingMemorySettings();
 document.getElementById('v2MemoryLoad').addEventListener('click', loadV2Memory);
