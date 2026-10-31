@@ -22,9 +22,9 @@ try {
   await page.locator('#enabled').check(); await page.locator('#inherit').uncheck();
   await page.getByRole('button', { name: '添加额度', exact: true }).click();
   const row = page.locator('#rules tr').first();
-  await row.getByLabel('资源', { exact: true }).fill('media.image'); await row.getByLabel('次数', { exact: true }).fill('2'); await row.getByLabel('窗口分钟', { exact: true }).fill('60');
+  await row.getByLabel('资源', { exact: true }).selectOption('media.image'); await row.getByLabel('次数', { exact: true }).fill('2'); await row.getByLabel('窗口分钟', { exact: true }).fill('60');
   await page.getByRole('button', { name: '添加额度', exact: true }).click();
-  const video = page.locator('#rules tr').last(); await video.getByLabel('资源', { exact: true }).fill('media.video'); await video.getByLabel('次数', { exact: true }).fill('1'); await video.getByLabel('窗口分钟', { exact: true }).fill('30');
+  const video = page.locator('#rules tr').last(); assert.equal(await video.getByLabel('资源', { exact: true }).inputValue(), 'media.video'); await video.getByLabel('资源', { exact: true }).selectOption('media.video'); await video.getByLabel('次数', { exact: true }).fill('1'); await video.getByLabel('窗口分钟', { exact: true }).fill('30');
   await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/quotas/config') && r.request().method() === 'POST'), page.getByRole('button', { name: '保存额度配置', exact: true }).click()]);
   assert.equal(h.cfg.quotas.rules.length, 2); assert.equal(h.cfg.quotas.enabled, true);
   h.usageQuotas.consume('group:456', 'media.image'); h.usageQuotas.consume('group:456', 'media.image');
