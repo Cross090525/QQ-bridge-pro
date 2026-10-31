@@ -19,12 +19,14 @@ import { MemoryProviderRuntime } from './framework/memory-providers.mjs';
 import { archiveLegacyMemory, legacyMemoryOperation } from './framework/memory-compat.mjs';
 import { DebateTasks, handleDebateApi } from './framework/debate.mjs';
 import { projectDebateContext } from './framework/debate-context.mjs';
+import { DebateRequests, normalizeDebateWake } from './framework/debate-requests.mjs';
+import { ManagedDebateWorkers } from './framework/debate-workers.mjs';
 let closeContentServices = async () => {};
 import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
@@ -707,6 +709,7 @@ function loadConfig() {
     consoleToken: file.consoleToken ?? '',
     framework: file.framework ?? { services: [] },
     memory: file.memory ?? { provider: null, providers: [] },
+    debate: { groupWake: normalizeDebateWake(file.debate?.groupWake) },
     // 价目表覆盖项（可选）。留空即用 src/model-prices.js 的官方默认价。
     pricing: file.pricing ?? null,
     security: {
@@ -1571,7 +1574,14 @@ async function main() {
     }
     return { parts, sources: offered, jobs: deliveredJobs };
   }
+  let debateBaseUrl = '';
+  const debateWorkers = new ManagedDebateWorkers({ directory: path.join(STATE_DIR, 'debate-workers'),
+    entry: path.join(ROOT, 'examples', 'debate-worker.mjs'), spawn,
+    baseUrl: () => { if (!debateBaseUrl) throw Error('控制台尚未启动'); return debateBaseUrl; },
+    onError: (id, error) => { const task = debateTasks.tasks.get(id); if (task && task.status === 'active') task.worker = { state: 'error', error: task.worker?.error || error, lastSeenAt: 0 }; },
+  });
   const debateTasks = new DebateTasks({
+    onControl: (task, action) => debateWorkers.control(task, action),
     assertGroup: (key, policy) => {
       if (!key.startsWith('group:') || !isSessionAllowedInCurrentMode(key) || modeFor(key) !== 'reserved2'
           || socialV2.paused || cfg.socialV2?.enabled === false || shouldBlockSilentReply(key)
@@ -1591,6 +1601,18 @@ async function main() {
         part => recordSentMessagesV2(key, [part], 'debate', taskId));
     }),
   });
+  const debateRequests = new DebateRequests({ config: cfg.debate.groupWake, tasks: debateTasks,
+    assertGroup: (key, policy) => debateTasks.assertGroup(key, policy), audit: entry => extensionPermissions.record(entry),
+    start: async credential => { debateTasks.get(credential.task.id).managedWorker = true; await debateWorkers.start(credential); },
+  });
+  function saveDebateWakeConfig(input) {
+    const config = normalizeDebateWake(input), fileName = path.join(ROOT, 'config.json');
+    const file = readConfigObject(fileName);
+    file.debate = { ...file.debate, groupWake: config };
+    atomicWriteJson(fileName, file);
+    cfg.debate.groupWake = config;
+    return debateRequests.configure(config);
+  }
   let memoryNamespaceSalt = '';
   if (cfg.memory?.providers?.length) {
     const namespaceFile = path.join(STATE_DIR, 'memory-namespace.json');
@@ -1604,7 +1626,11 @@ async function main() {
       return (socialV2.conversations.get(key)?.recentMessages ?? []).filter(message => seqs.includes(message.seq))
         .map(message => ({ ...message, plain: redactKnownTokensOnly(String(message.plain ?? message.text ?? '')) }));
     } });
-  closeContentServices = () => { observationStopped = true; return Promise.allSettled([contentServices.close(), memoryProviders.close()]); };
+  closeContentServices = () => {
+    observationStopped = true;
+    for (const task of debateTasks.tasks.values()) if (task.managedWorker) { try { debateTasks.control(task.id, 'stop'); } catch {} }
+    return Promise.allSettled([debateWorkers.close(), contentServices.close(), memoryProviders.close()]);
+  };
   const frameworkScope = (key, token) => crypto.createHash('sha256').update(`${key}\0${token}`).digest('hex');
 
   async function readFrameworkSource(source) {
@@ -3752,7 +3778,7 @@ async function main() {
       }
       try {
         if (debatePublic || url.pathname.startsWith('/api/debate/')) {
-          await handleDebateApi({ req, res, url, readBody, sendJson, tasks: debateTasks,
+          await handleDebateApi({ req, res, url, readBody, sendJson, tasks: debateTasks, requests: debateRequests, saveWakeConfig: saveDebateWakeConfig,
             admin: tokenMatches && req.headers['x-agent-token'] === undefined && req.headers['x-agent-call'] === undefined && req.headers['x-debate-token'] === undefined });
           return;
         }
@@ -7676,6 +7702,7 @@ async function main() {
       }
     }));
     server.listen(port, '127.0.0.1', () => {
+      debateBaseUrl = `http://127.0.0.1:${server.address().port}`;
       log(`本地控制台已启动：http://127.0.0.1:${port}`);
     });
     // 端口被占用说明已有实例在跑：以 exit 2 退出，守护脚本会识别为"已有实例"而不是无限重启
@@ -11146,6 +11173,32 @@ async function main() {
     if (!plainContent && !quoteTargetIsSelf) return;
     const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
     const roleState = readRoleState();
+
+    const debateDecision = /^\/debate-(approve|deny)\s+([a-f0-9]{32})\s*$/i.exec(plainContent);
+    if (debateDecision) {
+      if (!isOwner || key !== `private:${cfg.ownerQQ}`) { await sendToQQ(key, '争论启动审批仅管理员本人在机器人私聊中操作。'); return; }
+      try {
+        const request = await debateRequests.decide(debateDecision[2].toLowerCase(), debateDecision[1].toLowerCase());
+        await sendToQQ(key, request.status === 'approved' ? `已批准并启动争论任务 ${request.taskId}（${request.key}）。` : `已拒绝争论申请 ${request.id}。`);
+      } catch (error) { await sendToQQ(key, `审批未生效：${redactSensitiveText(error?.message || '申请已失效')}。`); }
+      return;
+    }
+    if (kind === 'group') {
+      try {
+        const result = debateRequests.receive({ key, userId: event.user_id, messageId: messageRef, segments: event.message, selfId: event.self_id });
+        if (result) {
+          if (result.duplicate) return;
+          const r = result.request;
+          // Only notify the actual owner private conversation; never disclose a task token.
+          if (cfg.ownerQQ) {
+            try { await sendToQQ(`private:${cfg.ownerQQ}`, `争论启动申请 ${r.id}\n群：${id}；申请人：${r.requesterId}；对象：${r.targetId}\n议题：${r.topic}\n关键词：${r.keywords.join('、')}\n有效期：${r.durationMinutes}分钟；发送：${r.sendMode === 'auto' ? '任务内自动发送（不逐条审核）' : '每条草稿审核后发送'}；背景：${r.includeContext ? '本群相关近期文字和媒体摘要' : '仅启动后候选消息'}\n申请5分钟内有效，尚未运行。\n批准启动：/debate-approve ${r.id}\n拒绝：/debate-deny ${r.id}\n也可在争论管理页审核。`); }
+            catch { log('争论申请管理员私聊通知失败，请从争论管理页审核'); }
+          }
+          await sendToQQ(key, `争论申请已提交管理员，审核通过后才会运行。申请编号：${r.id}`);
+          return;
+        }
+      } catch (error) { await sendToQQ(key, `争论申请未生效：${redactSensitiveText(error?.message || '申请无效')}。`); return; }
+    }
 
     // Explicit request IDs prevent ambiguous approvals. These commands never enter the model.
     const extensionDecision = /^\/(approve|deny)\s+([a-f0-9]{32})\s*$/i.exec(plainContent);

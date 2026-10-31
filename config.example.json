@@ -22,6 +22,15 @@
     "homeDir": ""
   },
   "ownerQQ": null,
+  "debate": {
+    "groupWake": {
+      "enabled": false,
+      "phrases": ["开启辩论"],
+      "durationMinutes": 30,
+      "sendMode": "review",
+      "includeContext": false
+    }
+  },
   "sessionCwd": "",
   "agentPreset": "qq-chat",
   "workspaceTitle": "QQ 聊天",

@@ -16,9 +16,9 @@ const cursor = value => {
 // Deliberately ephemeral: a process restart revokes every task credential and draft.
 // A task token grants only this finite API, never a conversation or console token.
 export class DebateTasks {
-  constructor({ now = Date.now, assertGroup, audit = () => {}, send, readContext = () => ({}) } = {}) {
+  constructor({ now = Date.now, assertGroup, audit = () => {}, send, readContext = () => ({}), onControl = () => {} } = {}) {
     this.now = now; this.assertGroup = assertGroup; this.audit = audit; this.send = send; this.readContext = readContext;
-    this.tasks = new Map();
+    this.tasks = new Map(); this.onControl = onControl;
   }
   record(event, task, extra = {}) {
     this.audit({ event: `debate-${event}`, key: task.key, taskId: task.id, ...extra });
@@ -35,7 +35,7 @@ export class DebateTasks {
       lastEventId: task.nextEvent, oldestEventId: task.events[0]?.id ?? null,
       lastRequestSeq: task.lastRequestSeq ?? 0,
       processedThrough: task.processedThrough ?? 0,
-      protocolVersion: 2, includeContext: task.includeContext, contextVersion: this.contextVersion(task),
+      protocolVersion: 2, managedWorker: task.managedWorker === true, includeContext: task.includeContext, contextVersion: this.contextVersion(task),
       needsReassessment: !!task.lastAnalysis && task.processedThrough >= task.nextEvent && task.lastAnalysis.contextVersion !== this.contextVersion(task),
       debateState: structuredClone(task.debateState),
       worker: { online: task.status === 'active' && task.expiresAt > this.now() && !!task.worker && task.worker.state !== 'stopped' && this.now() - task.worker.lastSeenAt < 6000,
@@ -80,14 +80,17 @@ export class DebateTasks {
     if (!['pause', 'resume', 'stop'].includes(action)) throw frameworkError('未知任务操作');
     if (task.status === 'stopped' || task.expiresAt <= this.now()) throw frameworkError('结束或过期的任务不能恢复', 409);
     if (action === 'resume') this.assertGroup(task.key, task.policy);
+    if ((action === 'resume' && task.status === 'active') || (action === 'pause' && task.status === 'paused')) return this.view(task);
     if (action === 'resume') this.record(action, task);
     task.revision++;
     task.batches.clear();
     task.status = { pause: 'paused', resume: 'active', stop: 'stopped' }[action];
+    task.worker = null;
     // Pause invalidates every pending draft; resume never resurrects approvals.
     for (const draft of task.drafts.values()) if (draft.status === 'pending') draft.status = 'cancelled';
     if (action === 'stop') { task.events = []; task.tokenHash = ''; }
     // Audit failure must never prevent an administrator from revoking a task.
+    this.onControl(task, action);
     if (action !== 'resume') this.record(action, task);
     return this.view(task);
   }
@@ -250,10 +253,16 @@ export class DebateTasks {
   }
 }
 
-export async function handleDebateApi({ req, res, url, readBody, sendJson, tasks, admin }) {
+export async function handleDebateApi({ req, res, url, readBody, sendJson, tasks, admin, requests, saveWakeConfig }) {
   const external = url.pathname.startsWith('/api/v1/debate/');
   if (!external && !admin) throw frameworkError('争论任务管理仅供管理员控制台使用', 403);
   if (!external) {
+    if (requests && req.method === 'GET' && url.pathname === '/api/debate/wake') return sendJson({ ok: true, config: structuredClone(requests.config) });
+    if (requests && req.method === 'POST' && url.pathname === '/api/debate/wake') return sendJson({ ok: true, config: await saveWakeConfig(await readBody()) });
+    if (requests && req.method === 'GET' && url.pathname === '/api/debate/requests') return sendJson({ ok: true, requests: requests.list() });
+    if (requests && req.method === 'POST' && url.pathname === '/api/debate/requests/review') {
+      const body = await readBody(); return sendJson({ ok: true, request: await requests.decide(body.requestId, body.decision) });
+    }
     if (req.method === 'GET' && url.pathname === '/api/debate/tasks') return sendJson({ ok: true, tasks: [...tasks.tasks.values()].map(t => tasks.view(t)) });
     if (req.method === 'POST' && url.pathname === '/api/debate/tasks') return sendJson({ ok: true, ...tasks.create(await readBody()) });
     const body = req.method === 'POST' ? await readBody() : null;

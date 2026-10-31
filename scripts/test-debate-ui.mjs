@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { EventEmitter } from 'node:events';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 import { DebateClient } from '../src/debate-client.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
-const h = await bridgeHarness({ config: { ownerQQ: 123, dualMode: { enabled: true, ownerPreset: 'standard' },
-  socialV2: { proactive: { enabled: false }, sticker: { enabled: false } } } });
+const workers=[];
+const h = await bridgeHarness({ config: { ownerQQ: 123, dualMode: { enabled: true, ownerPreset: 'standard' }, sendDelayMs: 0,
+  socialV2: { proactive: { enabled: false }, sticker: { enabled: false } } }, globals: { spawn: (...args) => {
+    const child=new EventEmitter(); child.kill=()=>{queueMicrotask(()=>child.emit('exit',0));return true;};workers.push({args,child});queueMicrotask(()=>child.emit('spawn'));return child;
+  } } });
 fs.mkdirSync(path.join(h.temp, 'public'));
 fs.copyFileSync(new URL('../public/debate.html', import.meta.url), path.join(h.temp, 'public/debate.html'));
 await h.ensureSession('group:456');
@@ -64,10 +68,33 @@ try {
   await page.getByRole('button', { name: '结束并撤销令牌', exact: true }).click();
   await page.locator('#tasks').filter({ hasText: '已结束' }).waitFor();
   await assert.rejects(client.task(), /令牌/);
+  await page.locator('#wakeEnabled').check();
+  await page.locator('#wakePhrases').fill('开个辩论\n启动争论');
+  await page.locator('#wakeMinutes').fill('15');
+  await page.locator('#wakeSendMode').selectOption('review');
+  await page.locator('#wakeContext').check();
+  await Promise.all([page.waitForResponse(r=>r.url().endsWith('/api/debate/wake')&&r.request().method()==='POST'),page.getByRole('button',{name:'保存唤起设置',exact:true}).click()]);
+  assert.deepEqual(h.cfg.debate.groupWake.phrases,['开个辩论','启动争论']);
+  const incoming = async (user,topic) => h.handleIncoming('group',456,{user_id:user,self_id:999,message_id:user,group_id:456,sender:{nickname:'群友'},message:[{type:'text',data:{text:'开个辩论 '}},{type:'at',data:{qq:'234'}},{type:'text',data:{text:' '+topic+' | 电池'}}]},h.cfg);
+  await incoming(345,'等待拒绝的申请');
+  await page.getByRole('button',{name:'刷新任务与分析',exact:true}).click();
+  await page.getByRole('button',{name:'拒绝启动',exact:true}).click();
+  await page.locator('#requests').filter({hasText:'已拒绝'}).waitFor();assert.equal(workers.length,0);
+  await incoming(346,'电池群聊申请 <img src=x onerror=window.injected=1>');
+  await page.getByRole('button',{name:'刷新任务与分析',exact:true}).click();
+  await page.getByRole('button',{name:'批准并启动分析器',exact:true}).click();
+  await page.locator('#requests').filter({hasText:'已批准'}).waitFor();assert.equal(workers.length,1);
+  const managed=page.locator('#tasks > article').filter({has:page.getByRole('heading',{name:'电池群聊申请 <img src=x onerror=window.injected=1>',exact:true})});
+  await managed.getByRole('button',{name:'暂停',exact:true}).click();
+  await managed.filter({hasText:'已暂停'}).waitFor();
+  await managed.getByRole('button',{name:'恢复',exact:true}).click();
+  await managed.filter({hasText:'进行中'}).waitFor();assert.equal(workers.length,2);
+  await managed.getByRole('button',{name:'结束并撤销令牌',exact:true}).click();await managed.filter({hasText:'已结束'}).waitFor();
+  assert.equal(await page.locator('img').count(),0);assert.equal(await page.evaluate(()=>window.injected),undefined);
   assert.deepEqual(errors, []);
   const screenshot = process.argv.find(arg => arg.startsWith('--screenshot='))?.slice(13);
   if (screenshot) await page.screenshot({ path: screenshot, fullPage: true });
-  console.log('PASS real debate console: automatic-send grant, scoped credential, XSS-safe rendering, pause/resume revision and stop revocation');
+  console.log('PASS real debate console: custom group triggers, admin deny/approve, managed worker pause/resume, scoped manual credentials and XSS-safe rendering');
 } finally {
   await browser?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await h.close();
 }
