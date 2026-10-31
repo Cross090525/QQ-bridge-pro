@@ -92,3 +92,24 @@ test('media evidence outside the bounded text snapshot can still receive a verif
   h.workingMemory.update(KEY, { revision: state.revision, media: [{ sourceId, summary: '已提供证据的图片' }] });
   assert.equal(h.workingMemory.get(KEY).media.find(m => m.sourceId === sourceId).status, 'understood');
 }));
+
+test('concurrent explicit reads share one in-flight image download and one reservation', () => fixture(async ({ h, receive, read, downloaded }) => {
+  await receive(1); let release, entered;
+  const started = new Promise(r => entered = r), gate = new Promise(r => release = r), original = h.bot.getImage.bind(h.bot);
+  h.bot.getImage = async input => { entered(); await gate; return original(input); };
+  const first = read(); await started; const second = read();
+  await pause(); assert.equal(h.usageQuotas.list().find(b => b.resource === 'media.image').used, 1);
+  release(); const results = await Promise.all([first, second]);
+  assert.equal(downloaded(), 1); assert.ok(results.every(r => r.images[0].data));
+}));
+test('a fresh wake excludes expired historical quota-blocked media and prioritizes new images', () => fixture(async ({ h, receive, downloaded }) => {
+  await receive(1);
+  const state = h.workingMemory.get(KEY), oldSource = state.messages[0].media[0].sourceId;
+  state.messages[0].time = Date.now() - 600000; h.workingMemory.save(KEY, state);
+  h.workingMemory.media(KEY, oldSource, { status: 'quota_blocked' });
+  await h.handleIncoming('group', 456, { user_id: 321, self_id: 999, group_id: 456, message_id: 101, sender: { nickname: '成员' },
+    message: [{ type: 'text', data: { text: '新图片' } }, { type: 'image', data: { file: 'fresh.png', url: 'https://public.invalid/fresh.png' } }] }, h.cfg);
+  await h.prepareObservationV2(KEY);
+  assert.equal(downloaded(), 1); assert.deepEqual(h.calls.images, ['fresh.png']);
+  assert.equal(h.workingMemory.get(KEY).media.find(m => m.sourceId === oldSource).status, 'quota_timeout');
+}));

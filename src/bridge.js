@@ -1500,7 +1500,13 @@ async function main() {
       context?.assertLive?.();
       if (!isSessionAllowedInCurrentMode(key) || sessionPolicy(key) !== policy || (modeFor(key) === 'reserved2' && (socialV2.paused || cfg.socialV2?.enabled === false))) throw frameworkError('等待额度的会话授权已变化', 403);
     };
-    try { return await usageQuotas.waitFor(() => usageQuotas.consume(key, resource, { legacy }), { budget, assertLive, signal: context?.signal }); }
+    try { return await usageQuotas.waitFor(() => usageQuotas.consume(key, resource, { legacy }), { budget, assertLive, signal: context?.signal, onWait: () => {
+      const unit = context?.mediaQuota;
+      if (!unit || budget.recordedDeadline === budget.deadline) return;
+      budget.recordedDeadline = budget.deadline;
+      const memory = workingMemory.get(key), message = memory.messages.find(m => m.media.some(r => r.sourceId === unit.sourceId));
+      for (const ref of message?.media || []) workingMemory.media(key, ref.sourceId, { quotaDeadline: budget.deadline });
+    } }); }
     catch (error) {
       if (error.code === 'QUOTA_TIMEOUT' && ['send.message', 'model.wake'].includes(resource) && !budget['final:' + resource]) {
         budget['final:' + resource] = true; budget.finalizing = true;
@@ -1524,6 +1530,7 @@ async function main() {
     mediaStore: frameworkMedia, readSource: readFrameworkSource, beforeExecute: ({ key, source, service }) => source ? mediaUsage(key, source, service.id) : null });
   const workingMemory = new WorkingMemory(path.join(STATE_DIR, 'working-memory'));
   const observationJobs = new Map();
+  const observationStartedAt = Date.now();
   const observationQueue = new ObservationQueue();
   let observationStopped = false;
   function workingEnabled() {
@@ -1532,7 +1539,7 @@ async function main() {
   function noteWorkingMediaEvidence(key, sourceId, evidence) {
     if (!workingEnabled() || socialV2.paused || modeFor(key) !== 'reserved2'
       || !isSessionAllowedInCurrentMode(key) || !workingMemory.get(key).messages.some(m => m.media.some(c => c.sourceId === sourceId))) return;
-    workingMemory.media(key, sourceId, { status: 'prepared', evidence: String(evidence).slice(0, 2500) });
+    workingMemory.media(key, sourceId, { status: 'prepared', evidence: String(evidence).slice(0, 2500), offeredAt: Date.now() });
     const media = workingMemory.get(key).media.filter(m => m.sourceId === sourceId);
     workingMemory.offered(key, { messages: [], media, topics: [], facts: [], questions: [], uncertainties: [] }, [sourceId]);
   }
@@ -1548,11 +1555,16 @@ async function main() {
     };
     assertLive();
     const state = workingMemory.get(key);
-    const sources = [...new Set(state.messages.flatMap(m => m.media.map(x => x.sourceId)))];
+    const sources = [...new Set(state.messages.slice().reverse().flatMap(m => m.media.map(x => x.sourceId)))];
     const jobs = [];
     for (const sourceId of sources) {
       const old = workingMemory.get(key).media.find(m => m.sourceId === sourceId);
       if (old?.status === 'understood' || old?.offeredAt || ['failed', 'unavailable', 'quota_timeout'].includes(old?.status)) continue;
+      const message = state.messages.find(m => m.media.some(ref => ref.sourceId === sourceId));
+      if ((old?.quotaDeadline && Date.now() >= old.quotaDeadline) || (!old?.quotaDeadline && message?.time < observationStartedAt && Date.now() - message.time >= 300000)) {
+        workingMemory.media(key, sourceId, { status: 'quota_timeout', evidence: '历史待处理媒体已超时，停止自动补读；需要时由当前任务明确补查。', offeredAt: Date.now() });
+        continue;
+      }
       const signature = permissionDigest([key, sourceId, token, policy, extensionPermissions.revision,
         contentServices.services, v2ToolEnabled('getImages'), v2ToolEnabled('contentServices')]);
       let job = observationJobs.get(signature);
@@ -1563,7 +1575,9 @@ async function main() {
         job = { parts: [], sourceId, key, done: false, delivered: false };
         workingMemory.media(key, sourceId, { status: 'pending', evidence: '', summary: '' });
         const source = contentSources.get(key, sourceId);
-        const observationContext = { ...requestContext.getStore(), quotaBudget: quotaBudget(key, 'media:' + source.messageId), mediaQuota: { key, sourceId, permit: null } };
+        const budget = quotaBudget(key, 'media:' + source.messageId);
+        if (old?.quotaDeadline) budget.deadline = Math.min(budget.deadline || Infinity, old.quotaDeadline);
+        const observationContext = { ...requestContext.getStore(), quotaBudget: budget, mediaQuota: { key, sourceId, permit: null } };
         job.promise = observationQueue.run(() => requestContext.run(observationContext, async () => {
           try {
             let successful = 0;
@@ -8416,12 +8430,15 @@ async function main() {
   }
 
   const imageReadCache = new Map();
+  const imageReadsInFlight = new Map();
   let imageReadCacheBytes = 0;
   async function readImageWithQuota(key, media) {
     requestContext.getStore()?.assertLive?.();
     const signature = permissionDigest([key, media.file, media.url, media.faceId, sessionPolicy(key), extensionPermissions.revision]);
     const cached = imageReadCache.get(signature);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
+    if (imageReadsInFlight.has(signature)) return imageReadsInFlight.get(signature);
+    const pending = (async () => {
     const permit = await mediaUsage(key, { ...media, type: 'image' });
     const value = media.kind === 'face' ? await fetchFaceMedia(media) : await fetchOneBotImage(media);
     permit.check(); requestContext.getStore()?.assertLive?.();
@@ -8432,6 +8449,9 @@ async function main() {
       while (imageReadCache.size > 32 || imageReadCacheBytes > 24000000) { const [id, entry] = imageReadCache.entries().next().value; imageReadCacheBytes -= entry.bytes; imageReadCache.delete(id); }
     }
     return value;
+    })();
+    imageReadsInFlight.set(signature, pending);
+    try { return await pending; } finally { if (imageReadsInFlight.get(signature) === pending) imageReadsInFlight.delete(signature); }
   }
   async function resolveMediaList(mediaList, key) {
     const parts = [];
