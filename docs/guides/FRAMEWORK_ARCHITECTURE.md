@@ -160,9 +160,9 @@ sequenceDiagram
 flowchart TB
   Source[当前会话实际收到的 sourceId] --> Discover[qq_content_services\n发现服务、参数与权限]
   Discover --> Decide{Agent 判断任务需要}
-  Decide -->|B站文字与声音| BT[bilibili.transcript]
-  Decide -->|B站画面| BF[bilibili.frames]
-  Decide -->|QQ视频 / 动图画面| MF[media.frames]
+  Decide -->|B站文字与声音| BT[bilibili.storyboard]
+  Decide -->|B站画面| BF[bilibili.storyboard]
+  Decide -->|QQ视频 / 动图画面| MF[media.storyboard]
   Decide -->|QQ语音 / 视频音轨| MT[media.transcript]
   BT --> Subtitle{所需区间有可用字幕?}
   Subtitle -->|有| Text[按时间筛选字幕\n保留实际边界与覆盖信息]

@@ -4437,6 +4437,7 @@ async function main() {
           if (merged.extractCooldownMs !== undefined) merged.extractCooldownMs = Math.max(0, Math.round(Number(merged.extractCooldownMs) || 0));
           if (merged.injectMax !== undefined) merged.injectMax = Math.min(30, Math.max(1, Math.round(Number(merged.injectMax) || 1)));
           if (merged.autoResearch !== undefined) merged.autoResearch = merged.autoResearch === true;
+          if (merged.referenceFallback !== undefined) merged.referenceFallback = merged.referenceFallback === true;
           if (merged.learnerPreset !== undefined) merged.learnerPreset = String(merged.learnerPreset ?? '').trim();
           if (merged.workspaceTitle !== undefined) merged.workspaceTitle = String(merged.workspaceTitle ?? '').trim() || 'QQ 黑话学习';
           if (body.inferenceThresholds !== undefined) {
@@ -5182,7 +5183,7 @@ async function main() {
             sendJson({ ok: true, key, ...result }, result.status === 'approval_required' ? 202 : 200); return;
           }
           const result = queryConversationContext({
-            state: getSocialV2State(key), slangEntries,
+            state: getSocialV2State(key), slangEntries, slangReferenceFallback: cfg.slang?.referenceFallback !== false,
             role: { name: readRoleState().role, text: roleText, version: crypto.createHash('sha256').update(roleText).digest('hex').slice(0, 16) },
           }, query);
           sendJson({ ok: true, key, ...result });
@@ -7114,7 +7115,8 @@ async function main() {
           if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('slangQuery')) { sendJson({ ok: false, error: '工具未启用：qq_slang_query' }, 403); return; }
-          const result = queryConversationContext({ slangEntries }, { kind: 'slang', query: q });
+          if (cfg.slang?.enabled === false) { sendJson({ ok: false, error: '黑话功能未启用' }, 403); return; }
+          const result = queryConversationContext({ slangEntries, slangReferenceFallback: cfg.slang?.referenceFallback !== false }, { kind: 'slang', query: q });
           const list = result.items;
           sendJson({
             ok: true,
@@ -7123,8 +7125,11 @@ async function main() {
             entries: list,
             nextOffset: result.nextOffset,
             truncated: result.truncated,
+            ...(result.provenance ? { provenance: result.provenance, note: result.note } : {}),
             block: cfg.socialV2?.context?.strategy === 'inline'
-              ? buildSlangContext(list.map(entry => ({ ...entry, status: SLANG_STATUS.CONFIRMED })), list.length) : ''
+              ? (result.provenance === 'static-reference'
+                ? '【通用词典参考，未经本群确认】\n' + list.map(entry => `${entry.content}: ${entry.meaning}`).join('\n')
+                : buildSlangContext(list.map(entry => ({ ...entry, status: SLANG_STATUS.CONFIRMED })), list.length)) : ''
           });
           return;
         }
@@ -10377,7 +10382,7 @@ async function main() {
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const videoHint = st.unread.some(message => message.content?.some(item => item.platform === 'bilibili'))
-      ? '【待处理B站分享】先读未读消息取得该链接的 sourceId，调用 qq_content_services，再用 qq_process_content 调用 bilibili.transcript；需要画面再调用 bilibili.frames。web_fetch 只读网页，不代表打开了视频；未尝试获准内容服务前不要断言视频打不开。\n\n' : '';
+      ? '【待处理B站分享】先读未读消息取得该链接的 sourceId，调用 qq_content_services，再用 qq_process_content 调用 bilibili.storyboard 取得分镜图、台词和时间码；精查用mode=zoom及明确时间段。web_fetch 只读网页，不代表打开了视频；未尝试获准内容服务前不要断言视频打不开。\n\n' : '';
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n${videoHint}`;
     if (cfg.socialV2?.context?.strategy !== 'inline') {
       const roleVersion = crypto.createHash('sha256').update(currentRoleHintV2()).digest('hex').slice(0, 16);

@@ -2040,7 +2040,7 @@ button:active:not(:disabled) {
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="setWakeConfig"> <span><b>qq_set_wake_config</b><span class="meta">设置唤醒/潜水条件：无限期、有限时间、@/名字/关键词/概率等</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="markRead"> <span><b>qq_mark_read</b><span class="meta">标记当前未读为已读（看过但决定不回复）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="memory"> <span><b>qq_memory_append / qq_memory_query</b><span class="meta">轻量记忆：话题/想说的话/群友印象</span></span></label>
-        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="slangQuery"> <span><b>qq_slang_query</b><span class="meta">查询已确认黑话/梗/网络表达</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="slangQuery"> <span><b>qq_slang_query</b><span class="meta">优先查询已确认黑话，未命中时补充通用词典参考</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="slangSubmit"> <span><b>qq_slang_submit</b><span class="meta">AI 提交陌生词/黑话给管理员筛选</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="listStickers"> <span><b>qq_list_stickers</b><span class="meta">查看/搜索 QQ 收藏表情（含备注和本地笔记）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getStickerImage"> <span><b>qq_get_sticker_image</b><span class="meta">看图理解没有备注的收藏表情</span></span></label>
@@ -2408,6 +2408,7 @@ button:active:not(:disabled) {
         <div class="row">
           <label style="flex:1">启用黑话学习</label><input type="checkbox" id="slangEnabled" style="width:auto">
         </div>
+        <div class="row"><label style="flex:1">已确认黑话未命中时，补充通用词典参考（不自动入库）</label><input type="checkbox" id="slangReferenceFallback" style="width:auto"></div>
         <div class="row">
           <label style="flex:1">触发提取最少消息数</label><input type="number" id="slangExtractMin" min="1" style="width:90px">
         </div>
@@ -2447,7 +2448,7 @@ button:active:not(:disabled) {
         <tr><td>qq_send_group_message</td><td>发群消息；可选 <code>replyToMessageId</code> 引用/回复</td></tr>
         <tr><td>qq_reply</td><td>专用“引用/回复”：在群里引用某条消息并发送文本</td></tr>
         <tr><td>qq_send_private_message</td><td>发私聊；可选 <code>replyToMessageId</code> 引用/回复</td></tr>
-        <tr><td>qq_slang_query</td><td>查询已确认黑话/梗/网络表达（只读）</td></tr>
+        <tr><td>qq_slang_query</td><td>优先查询已确认黑话，未命中时补充通用词典参考（只读）</td></tr>
         <tr><td>qq_slang_submit</td><td>AI 提交陌生词/黑话给管理员筛选</td></tr>
       </table>
       <div class="meta" style="margin-top:10px">二代仿真模式工具：qq_get_prompt / qq_get_unread_messages / qq_get_recent_messages / qq_social_state / qq_send_burst / qq_send_message / qq_wait_for_messages / qq_set_wake_config / qq_mark_read / qq_memory_* / qq_slang_query / qq_slang_submit 等。</div>
@@ -4398,6 +4399,7 @@ function loadSlangConfig() {
   api('/api/slang').then(r => {
     const c = r.config || {};
     document.getElementById('slangEnabled').checked = c.enabled !== false;
+    document.getElementById('slangReferenceFallback').checked = c.referenceFallback !== false;
     document.getElementById('slangExtractMin').value = c.extractMinMessages ?? 10;
     document.getElementById('slangCooldown').value = c.extractCooldownMs ?? 300000;
     document.getElementById('slangThresholds').value = (c.inferenceThresholds || [2, 4, 8]).join(', ');
@@ -4410,6 +4412,7 @@ function loadSlangConfig() {
 document.getElementById('slangConfigSave').addEventListener('click', async () => {
   const r = await api('/api/slang/config', 'POST', {
     enabled: document.getElementById('slangEnabled').checked,
+    referenceFallback: document.getElementById('slangReferenceFallback').checked,
     extractMinMessages: Number(document.getElementById('slangExtractMin').value) || 10,
     extractCooldownMs: Number(document.getElementById('slangCooldown').value) || 300000,
     inferenceThresholds: document.getElementById('slangThresholds').value.split(/[,，\s]+/).map(Number).filter(Boolean),

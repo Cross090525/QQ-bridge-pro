@@ -1,27 +1,23 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_BILIBILI_SOURCE } from './media-provider.mjs';
 import { mediaPaths } from './media-engine.mjs';
 
-export function buildMediaServices({ entry = fileURLToPath(new URL('./media-provider.mjs', import.meta.url)), upstream = DEFAULT_BILIBILI_SOURCE,
+export function buildMediaServices({ entry = fileURLToPath(new URL('./media-provider.mjs', import.meta.url)),
   ffmpeg = mediaPaths().ffmpeg, ffprobe = mediaPaths().ffprobe, asrModule, asrModel } = {}) {
-  const args = [entry, `--upstream=${path.resolve(upstream)}`, `--ffmpeg=${path.resolve(ffmpeg)}`, `--ffprobe=${path.resolve(ffprobe)}`,
+  const args = [entry, `--ffmpeg=${ffmpeg}`, `--ffprobe=${ffprobe}`,
     ...(asrModule ? [`--asr-module=${path.resolve(asrModule)}`] : []), ...(asrModel ? [`--asr-model=${path.resolve(asrModel)}`] : [])];
   const transport = { type: 'stdio', command: process.execPath, args };
   const window = { startSeconds: { type: 'number' }, durationSeconds: { type: 'number' } };
-  const frames = { properties: { maxFrames: { type: 'number' }, timestamps: { type: 'string', maxLength: 160 },
-    sampling: { type: 'string', enum: ['uniform', 'scene'] }, ...window } };
-  const transcript = { properties: { ...window, segmentSeconds: { type: 'number' } } };
+  const storyboard = { properties: { ...window, cells: { type: 'number' }, need: { type: 'string', enum: ['shot', 'scene', 'text'] },
+    detail: { type: 'string', enum: ['low', 'med', 'high'] }, mode: { type: 'string', enum: ['board', 'zoom'] }, asr: { type: 'boolean' } } };
+  const inputHint = 'dsh-video-storyboard分镜+时间码+台词。默认前120秒，单次最多180秒；cells 1–9；need=scene/shot/text，detail=low/med/high。按nextInput续看。精查同一sourceId传mode=zoom、startSeconds和durationSeconds（最多30秒），少格更清晰。asr默认true，本机转写；不取得音轨不能推测静音。仅为抽样画面，不能声称逐帧看过全片。';
   return [
-    { id: 'bilibili.transcript', tool: 'bilibili_transcript', description: 'B站字幕与可选转写，不读取画面', accepts: ['link'], hosts: ['bilibili.com', 'b23.tv'],
-      inputSchema: { properties: { asr: { type: 'boolean' }, ...transcript.properties } },
-      inputHint: '先读字幕；asr默认true，无字幕时本机转写。默认0–120秒，单次最多180秒，segmentSeconds默认30、范围5–60，返回带起止时间的timeline。指定时间区间也筛选字幕。用同一sourceId和nextInput继续下一段；audio.status=partial需继续或说明缺口，失败不代表静音。asr=false只读字幕。' },
-    { id: 'bilibili.frames', tool: 'bilibili_frames', description: '按需获取B站视频的抽样画面，不代表看过全片', accepts: ['link'], hosts: ['bilibili.com', 'b23.tv'],
-      inputSchema: frames, inputHint: 'maxFrames 1–6默认4；sampling=scene检测场景切换，默认扫描0–120秒，startSeconds/durationSeconds指定区间、单次最多180秒，nextInput继续。timestamps逗号分隔的绝对秒数可精查，例如12.5,35，优先于场景选帧。默认uniform均匀抽样。最多30分钟/96MiB；抽样不代表全片，声音另调用bilibili.transcript。' },
-    { id: 'media.frames', tool: 'media_frames', description: '从收到的视频、GIF或WebP动图抽取有时间顺序的画面', accepts: ['video', 'image', 'sticker', 'file'], inputMode: 'bytes',
-      inputSchema: frames, inputHint: '只处理当前会话sourceId；maxFrames 1–6；sampling=scene按场景选帧，默认扫描前120秒、单次最多180秒，可用startSeconds/durationSeconds和nextInput继续。timestamps为绝对秒数，精查动作前后画面；不要只看动图首帧推断整个动作。' },
-    { id: 'media.transcript', tool: 'media_transcript', description: '本机 SenseVoice 识别收到的视频音轨或语音', accepts: ['video', 'voice', 'file'], inputMode: 'bytes',
-      inputSchema: transcript,
-      inputHint: '默认0–120秒、单次最多180秒；segmentSeconds默认30、范围5–60，返回segments及实际覆盖范围，时间为片段边界。用同一sourceId和nextInput继续；status=partial说明中途失败，不声称完整识别。无音轨明确失败，不推测声音。' },
+    { id: 'bilibili.storyboard', tool: 'bilibili_storyboard', description: '使用dsh-video-storyboard理解B站视频：编号分镜、时间码、字幕或本机转写',
+      accepts: ['link'], hosts: ['bilibili.com', 'b23.tv'], inputSchema: storyboard, inputHint },
+    { id: 'media.storyboard', tool: 'media_storyboard', description: '使用dsh-video-storyboard处理收到的视频、GIF和WebP：编号分镜与音轨台词',
+      accepts: ['video', 'image', 'sticker', 'file'], inputMode: 'bytes', inputSchema: storyboard, inputHint },
+    { id: 'media.transcript', tool: 'media_transcript', description: '本机SenseVoice识别收到的语音或独立音频', accepts: ['voice', 'file'], inputMode: 'bytes',
+      inputSchema: { properties: { ...window, segmentSeconds: { type: 'number' } } },
+      inputHint: '语音或独立音频使用此服务；视频使用media.storyboard。默认0–120秒、最多180秒，segmentSeconds 5–60。返回分段时间与nextInput，partial须说明缺口。' },
   ].map(service => ({ ...service, effect: 'read', timeoutMs: 180000, transport }));
 }

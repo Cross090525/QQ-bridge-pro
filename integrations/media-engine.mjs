@@ -3,15 +3,14 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { PNG } from 'pngjs';
 
 export const MAX_MEDIA_BYTES = 8 * 1024 * 1024;
 const repo = fileURLToPath(new URL('..', import.meta.url));
 export function mediaPaths() {
   const root = path.resolve(repo, '../media-runtime-fast/node_modules');
   return {
-    ffmpeg: process.env.FFMPEG_PATH || path.join(root, '@clayzo/ffmpeg-win32-x64/ffmpeg.exe'),
-    ffprobe: process.env.FFPROBE_PATH || path.join(root, '@ffprobe-installer/win32-x64/ffprobe.exe'),
+    ffmpeg: process.env.FFMPEG_PATH || (process.platform === 'win32' ? path.join(repo, 'node_modules/@ffmpeg-installer/win32-x64/ffmpeg.exe') : 'ffmpeg'),
+    ffprobe: process.env.FFPROBE_PATH || (process.platform === 'win32' ? path.join(root, '@ffprobe-installer/win32-x64/ffprobe.exe') : 'ffprobe'),
   };
 }
 export function runMedia(binary, args, { timeoutMs = 20000, maxOutput = 2 * 1024 * 1024, signal } = {}) {
@@ -20,7 +19,9 @@ export function runMedia(binary, args, { timeoutMs = 20000, maxOutput = 2 * 1024
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
     const timer = setTimeout(abort, timeoutMs);
-    const child = spawn(binary, args, { windowsHide: true, signal: controller.signal, stdio: ['ignore', 'pipe', 'pipe'] });
+    let child;
+    try { child = spawn(binary, args, { windowsHide: true, signal: controller.signal, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(Error('媒体运行时不可执行')); return; }
     const stdout = []; const stderr = []; let bytes = 0, spawnError;
     child.stdout.on('data', chunk => { bytes += chunk.length; if (bytes > maxOutput) abort(); else stdout.push(chunk); });
     child.stderr.on('data', chunk => { if (stderr.reduce((n, b) => n + b.length, 0) < 4096) stderr.push(chunk); });
@@ -78,31 +79,13 @@ export function fitTranscript(value, nested = false) {
   }
   return value;
 }
-export function frameTimes(duration, input = {}, lastFrameTime = Math.max(0, duration - 0.1)) {
-  const count = input.maxFrames ?? 4;
-  if (!Number.isSafeInteger(count) || count < 1 || count > 6) throw Error('maxFrames 须为 1–6');
-  if (input.sampling !== undefined && !['uniform', 'scene'].includes(input.sampling)) throw Error('sampling 须为 uniform 或 scene');
-  if (input.timestamps !== undefined && (typeof input.timestamps !== 'string' || !input.timestamps.trim() || input.timestamps.length > 160)) throw Error('抽帧时间不能为空或过长');
-  const windowed = input.startSeconds !== undefined || input.durationSeconds !== undefined || input.sampling === 'scene';
-  const { start, end } = windowed ? mediaWindow(duration, input) : { start: 0, end: duration };
-  if (typeof input.timestamps === 'string' && input.timestamps.trim()) {
-    if (input.timestamps.split(',').some(value => !value.trim())) throw Error('抽帧时间不能为空');
-    const times = input.timestamps.split(',').map(value => Number(value.trim()));
-    if (times.length > count || times.some(n => !Number.isFinite(n) || n < start || n >= end)) throw Error('抽帧时间超出视频或数量范围');
-    return [...new Set(times.map(time => Math.min(time, lastFrameTime)))].sort((a, b) => a - b);
-  }
-  if (end - start <= 0.2) return [Math.min(start, lastFrameTime)];
-  // Container duration may include audio/padding after the last decodable video
-  // frame. Default samples cover the timeline without seeking to that tail.
-  return [...new Set(Array.from({ length: count }, (_, i) => Math.floor(Math.min(lastFrameTime, start + (end - start) * i / count) * 1000) / 1000))];
-}
 export class LocalMediaEngine {
   constructor({ ffmpeg, ffprobe, temporaryRoot = os.tmpdir(), asrModule, asrModel } = {}) {
     const defaults = mediaPaths();
     this.ffmpeg = ffmpeg || defaults.ffmpeg; this.ffprobe = ffprobe || defaults.ffprobe;
     this.temporaryRoot = temporaryRoot;
-    this.asrModule = asrModule || path.resolve(repo, '../dsh-runtime/node_modules/sherpa-onnx-node/sherpa-onnx.js');
-    this.asrModel = asrModel || path.resolve(repo, '../external-media/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17');
+    this.asrModule = asrModule || process.env.QQ_MEDIA_ASR_MODULE || path.resolve(repo, '../dsh-runtime/node_modules/sherpa-onnx-node/sherpa-onnx.js');
+    this.asrModel = asrModel || process.env.QQ_MEDIA_ASR_MODEL || path.resolve(repo, '../external-media/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17');
   }
   async job(buffer, operation) {
     const ext = mediaExtension(buffer);
@@ -122,58 +105,6 @@ export class LocalMediaEngine {
     const rational = value => { const [a, b] = String(value || '').split('/').map(Number); return Number.isFinite(a / b) && a / b > 0 ? a / b : 0; };
     const frameRate = rational(video?.avg_frame_rate) || rational(video?.r_frame_rate) || Number(video?.nb_frames) / duration || 25;
     return { duration, width: video?.width, height: video?.height, frameRate, hasVideo: !!video, hasAudio: !!result.streams?.some(s => s.codec_type === 'audio') };
-  }
-  async frames(buffer, input = {}) {
-    return this.job(buffer, async ({ directory, file }) => {
-      const info = await this.probe(file);
-      if (!info.hasVideo) throw Error('媒体没有可读取的画面');
-      const ext = mediaExtension(buffer);
-      if (['.png', '.jpg'].includes(ext)) return { content: [{ type: 'text', text: JSON.stringify({ ...info, sampledTimes: [0], note: '此资源为静态图片，没有动态画面证据。' }) },
-        { type: 'image', mimeType: ext === '.png' ? 'image/png' : 'image/jpeg', data: buffer.toString('base64') }], evidence: ['metadata', 'frames'] };
-      let times = frameTimes(info.duration, input, Math.max(0, info.duration - 1 / info.frameRate)); const images = [];
-      const windowed = input.startSeconds !== undefined || input.durationSeconds !== undefined || input.sampling === 'scene';
-      const window = windowed ? mediaWindow(info.duration, input) : { start: 0, end: info.duration };
-      let sceneTimes = [];
-      if (input.sampling === 'scene' && input.timestamps === undefined) {
-        // Decode only the requested window at low resolution; FFmpeg never receives a URL.
-        const scanFile = path.join(directory, 'scene-scan.rgb'), frameSize = 64 * 36 * 3;
-        await runMedia(this.ffmpeg, ['-v', 'error', '-nostdin', '-protocol_whitelist', 'file,pipe', '-ss', String(window.start), '-i', file,
-          '-t', String(window.end - window.start), '-an', '-vf', 'scale=64:36,fps=2', '-frames:v', '360',
-          '-pix_fmt', 'rgb24', '-c:v', 'rawvideo', '-f', 'rawvideo', '-threads', '1', '-y', scanFile], { timeoutMs: 30000 });
-        if ((await fs.stat(scanFile)).size > frameSize * 360) throw Error('场景检测输出超限');
-        const scan = await fs.readFile(scanFile);
-        let previous;
-        for (let offset = 0; offset + frameSize <= scan.length; offset += frameSize) {
-          const histogram = new Uint32Array(48);
-          for (let p = 0; p < frameSize; p++) histogram[p % 3 * 16 + (scan[offset + p] >> 4)]++;
-          const delta = previous ? histogram.reduce((sum, count, i) => sum + Math.abs(count - previous[i]), 0) / (2 * frameSize) : 0;
-          const time = window.start + offset / frameSize / 2;
-          if (delta > 0.35 && time < window.end && time <= info.duration - 1 / info.frameRate) sceneTimes.push(time);
-          previous = histogram;
-        }
-        // One candidate per time bin keeps a burst of cuts from hiding the rest of the window.
-        times = times.map((fallback, i) => sceneTimes.find(time => time >= window.start + (window.end - window.start) * i / times.length
-          && time < window.start + (window.end - window.start) * (i + 1) / times.length) ?? fallback);
-        times = [...new Set(times)].sort((a, b) => a - b);
-      }
-      const factor = Math.min(1, 640 / info.width, 640 / info.height);
-      const width = Math.max(1, Math.floor(info.width * factor)), height = Math.max(1, Math.floor(info.height * factor));
-      for (const [index, time] of times.entries()) {
-        const output = path.join(directory, `frame-${index}.rgb`);
-        await runMedia(this.ffmpeg, ['-v', 'error', '-nostdin', '-protocol_whitelist', 'file,pipe', '-ss', String(time), '-i', file,
-          '-frames:v', '1', '-vf', `scale=${width}:${height}`, '-pix_fmt', 'rgb24', '-c:v', 'rawvideo', '-f', 'rawvideo', '-threads', '1', '-y', output]);
-        const bytes = await fs.readFile(output);
-        if (bytes.length !== width * height * 3) throw Error('抽帧结果不完整');
-        const image = new PNG({ width, height });
-        for (let i = 0; i < width * height; i++) { image.data[i * 4] = bytes[i * 3]; image.data[i * 4 + 1] = bytes[i * 3 + 1]; image.data[i * 4 + 2] = bytes[i * 3 + 2]; image.data[i * 4 + 3] = 255; }
-        images.push({ type: 'image', mimeType: 'image/png', data: PNG.sync.write(image).toString('base64') });
-      }
-      return { content: [{ type: 'text', text: JSON.stringify({ ...info, sampledTimes: times, evidence: 'sampled_frames',
-        sampling: input.timestamps !== undefined ? 'timestamps' : input.sampling ?? 'uniform', sceneTimes: sceneTimes.slice(0, 60), sceneTimesTruncated: sceneTimes.length > 60,
-        coverage: { startSeconds: window.start, endSeconds: window.end, partial: window.start > 0 || window.end < info.duration, sampledOnly: true },
-        nextInput: windowed ? continuation(window.end, info.duration, { sampling: input.sampling ?? 'uniform', maxFrames: input.maxFrames ?? 4, durationSeconds: input.durationSeconds ?? 120 }) : null,
-        note: '图片按 sampledTimes 请求时间顺序排列，时间可有一个编码帧的偏差；仅看到抽样画面，不能据此声称看过完整视频或听到音轨。' }) }, ...images], evidence: ['metadata', 'frames'] };
-    });
   }
   async transcript(buffer, input = {}) {
     const start = input.startSeconds ?? 0, seconds = input.durationSeconds ?? 120;
