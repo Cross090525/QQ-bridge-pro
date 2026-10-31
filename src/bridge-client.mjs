@@ -1,6 +1,6 @@
 // Dependency-free client for external MCP servers, scripts and skill runners.
 export class QQBridgeClient {
-  constructor({ baseUrl = 'http://127.0.0.1:3100', key, token, timeoutMs = 30000, fetchImpl = globalThis.fetch } = {}) {
+  constructor({ baseUrl = 'http://127.0.0.1:3100', key, token, timeoutMs = 660000, fetchImpl = globalThis.fetch } = {}) {
     const url = new URL(baseUrl);
     if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
         || url.username || url.password || url.search || url.hash || url.pathname !== '/') {

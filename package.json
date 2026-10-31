@@ -76,7 +76,7 @@
     "memory:migrate:legacy": "node scripts/migrate-legacy-memory.mjs",
     "test:memory:migrate": "node --test scripts/test-migrate-legacy-memory.mjs",
     "test:debate": "node --test scripts/test-debate.mjs scripts/test-debate-v2.mjs scripts/test-debate-requests.mjs",
-    "test:quotas": "node --test scripts/test-usage-quotas.mjs",
+    "test:quotas": "node --test scripts/test-usage-quotas.mjs scripts/test-quota-continuation.mjs",
     "test:quotas:ui": "node scripts/test-usage-quotas-ui.mjs",
     "test:debate:ui": "node scripts/test-debate-ui.mjs",
     "test:debate:dsh": "node scripts/test-debate-dsh.mjs",

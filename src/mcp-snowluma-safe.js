@@ -151,6 +151,7 @@ function errorText(value, fallback) {
 }
 
 async function agentApi(path, init = {}) {
+  if (/^\/api\/(images\/message|send\/|socialV2\/(content|memory|send|feedback|slang\/submit|sticker))/.test(path)) return agentApiLongPoll(path, { ...init, timeoutMs: Math.max(init.timeoutMs || 15000, 660000) });
   const timeoutMs = init.timeoutMs || 15000;
   const { timeoutMs: _omit, ...rest } = init;
   const headers = agentHeaders(rest.headers);
@@ -239,8 +240,8 @@ function agentApiLongPoll(path, init = {}) {
         response.on('data', (chunk) => {
           if (settled) return;
           size += chunk.length;
-          // 桥接的 wait 响应本来就是小 JSON；超过 4MB 说明对端异常，别把内存吃光。
-          if (size > 4 * 1024 * 1024) {
+          // 桥接的 wait 响应本来就是小 JSON；媒体证据最多约16MB base64；超过20MB说明对端异常，别把内存吃光。
+          if (size > 20 * 1024 * 1024) {
             finish(new Error('等待响应体过大，已中止'));
             response.destroy();
             return;
@@ -790,9 +791,11 @@ server.tool(
         method: 'POST',
         body: JSON.stringify({ key, purpose, timeoutMs, minNewMessages, quietMs }),
         headers: { 'x-agent-token': token },
-        timeoutMs: Math.min(725000, (Number(timeoutMs) || 30000) + Math.max(Number(quietMs) || 0, 10000) + 20000)
+        timeoutMs: Math.max(660000, Math.min(725000, (Number(timeoutMs) || 30000) + Math.max(Number(quietMs) || 0, 10000) + 20000))
       });
-      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      const { mediaEvidence = [], ...info } = data;
+      const content = [{ type: 'text', text: serializeModelData(info) }, ...mediaEvidence.map(p => p.type === 'image' ? { type: 'image', mimeType: p.mediaType || p.mimeType, data: p.data } : p)];
+      return { content };
     } catch (error) {
       return { content: [{ type: 'text', text: `等待失败：${error?.message ?? error}` }], isError: true };
     }
@@ -1125,11 +1128,12 @@ if (cfg.socialV2?.tools?.getImages !== false) {
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       messageId: z.union([z.number(), z.string()]).describe('要查看的消息 id（QQ 消息 id 可为负数；二代也可用本地 seq）'),
+      offset: z.number().int().min(0).optional().describe('从0开始的图片位置；上一批 nextOffset 非空时继续读取，不能跳过未读部分'),
       token: z.string().optional().describe('二代会话令牌（reserved2 下必填，见唤醒提示中的【会话令牌】）')
     },
-    async ({ key, messageId, token }) => {
+    async ({ key, messageId, token, offset = 0 }) => {
       try {
-        const q = new URLSearchParams({ key, messageId: String(messageId) });
+        const q = new URLSearchParams({ key, messageId: String(messageId), offset: String(offset) });
         const data = await agentApi(`/api/images/message?${q.toString()}`, {
           headers: token ? { 'x-agent-token': token } : {},
           timeoutMs: 180000
@@ -1149,7 +1153,7 @@ if (cfg.socialV2?.tools?.getImages !== false) {
           }
         }
         if (textParts.length) {
-          content.unshift({ type: 'text', text: `消息 ${messageId} 的媒体内容（${images.length} 项）：\n${textParts.join('\n')}` });
+          content.unshift({ type: 'text', text: `消息 ${messageId} 的媒体内容（${images.length} 项）：\n${textParts.join('\n')}\n${data.note || ''}\n${data.nextOffset != null ? '继续读取 offset=' + data.nextOffset : ''}` });
         }
         return { content };
       } catch (error) {

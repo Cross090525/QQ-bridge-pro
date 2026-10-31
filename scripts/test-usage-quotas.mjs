@@ -33,7 +33,7 @@ test('one approval resets only its bound bucket and starts a new finite window',
   const old = f.quotas.consume(KEY, 'media.image'); f.quotas.consume(KEY, 'media.video');
   const image = f.quotas.list().find(b => b.resource === 'media.image');
   const result = f.quotas.resolve(image.requestId, 'approve'); assert.equal(result.used, 0); assert.equal(result.blocked, false);
-  assert.throws(() => old.check(), /变更/); assert.throws(() => f.quotas.resolve(image.requestId, 'approve'), /已处理/);
+  assert.doesNotThrow(() => old.check()); assert.throws(() => f.quotas.resolve(image.requestId, 'approve'), /已处理/);
   assert.throws(() => f.quotas.consume(KEY, 'media.video'), { code: 'QUOTA_EXHAUSTED' }); f.quotas.consume(KEY, 'media.image');
   assert.notEqual(f.quotas.list().find(b => b.resource === 'media.image').requestId, image.requestId);
 });
@@ -82,10 +82,10 @@ test('deadline timer resumes pending work without new input or an open console',
   f.quotas.consume(KEY, 'media.image'); assert.equal(resumed, 0); f.advance(60000); callback();
   assert.equal(resumed, 1); assert.equal(f.state().buckets[0].used, 0); f.quotas.close();
 });
-test('a read reserved before its deadline may finish after natural renewal; early reset revokes old reservations', () => {
+test('a read reserved before its deadline may finish after natural renewal; early reset preserves completed reservations', () => {
   const f = unit([rule('media.video', { limit: 1, windowMinutes: 1 })]);
   const lease = f.quotas.consume(KEY, 'media.video'); f.advance(60000); f.quotas.list(); assert.doesNotThrow(() => lease.check());
-  const next = f.quotas.consume(KEY, 'media.video'); f.quotas.resolve(f.quotas.list()[0].requestId, 'approve'); assert.throws(() => next.check(), /变更/); f.quotas.close();
+  const next = f.quotas.consume(KEY, 'media.video'); f.quotas.resolve(f.quotas.list()[0].requestId, 'approve'); assert.doesNotThrow(() => next.check()); f.quotas.close();
 });
 test('debate worker waits without model calls at quota and resumes after early reset', { timeout: 10000 }, async () => {
   const f = unit([rule('debate.analysis', { limit: 1 })]);

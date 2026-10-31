@@ -25,9 +25,10 @@ export function normalizeQuotaConfig(value = {}) {
 // Counts reservations, not model claims of success. Suspension is derived from
 // the current window's usage; it expires automatically. Approval resets early.
 export class UsageQuotas {
-  constructor({ config, state = null, now = Date.now, save = () => {}, notify = () => {}, audit = () => {}, onReset = () => {}, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  constructor({ config, state = null, now = Date.now, save = () => {}, notify = () => {}, audit = () => {}, onReset = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, waitMs = 300000 } = {}) {
     this.config = normalizeQuotaConfig(config); this.now = now; this.save = save; this.notify = notify; this.audit = audit; this.onReset = onReset;
     this.setTimer = setTimer; this.clearTimer = clearTimer;
+    this.waitMs = waitMs; this.waiters = new Set();
     if (state !== null && (!state || state.version !== 1 || !Array.isArray(state.buckets) || state.buckets.length > 4096
       || new Set(state.buckets.map(b => b?.id)).size !== state.buckets.length
       || state.buckets.some(b => !b || !/^[a-f0-9]{64}$/.test(b.id ?? '') || !resourceOk(b.resource) || !Number.isSafeInteger(b.used) || b.used < 0
@@ -45,6 +46,7 @@ export class UsageQuotas {
     // Persist counts and deadlines, never a permanent "blocked" flag.
     this.save({ ...next, buckets: next.buckets.map(({ blocked, ...bucket }) => bucket) });
     this.state = next; this.schedule();
+    for (const wake of [...this.waiters]) wake();
   }
   configure(config) {
     const previous = this.config, updated = normalizeQuotaConfig(config), next = structuredClone(this.state), notifications = [];
@@ -85,7 +87,30 @@ export class UsageQuotas {
     if (next.buckets.some((b, i) => b.cycle !== this.state.buckets[i].cycle)) this.commit(next); else this.schedule();
     for (const b of renewed) { try { this.onReset(structuredClone(b)); } catch {} }
   }
-  close() { this.closed = true; this.clearTimer(this.timer); }
+  close() { this.closed = true; this.clearTimer(this.timer); for (const wake of [...this.waiters]) wake(); }
+  async waitFor(operation, { budget = {}, assertLive = () => {}, signal, onWait = () => {} } = {}) {
+    for (;;) {
+      signal?.throwIfAborted(); assertLive();
+      if (this.closed) throw frameworkError('额度任务已取消：桥接正在关闭', 503);
+      if (budget.deadline && this.now() >= budget.deadline) {
+        const error = frameworkError('等待额度已满5分钟，请根据已经取得的信息回应，并说明尚未读取的内容', 408);
+        error.code = 'QUOTA_TIMEOUT'; throw error;
+      }
+      try { return operation(); } catch (error) {
+        if (error.code !== 'QUOTA_EXHAUSTED' || this.waitMs === 0) throw error;
+        budget.deadline ??= this.now() + this.waitMs;
+        onWait(error);
+        if (this.waiters.size >= 128) throw frameworkError('额度等待任务过多', 429);
+        await new Promise((resolve, reject) => {
+          let timer;
+          const done = () => { this.clearTimer(timer); this.waiters.delete(done); signal?.removeEventListener('abort', aborted); resolve(); };
+          const aborted = () => { done(); reject(signal.reason || Error('任务已取消')); };
+          this.waiters.add(done); signal?.addEventListener('abort', aborted, { once: true });
+          timer = this.setTimer(done, Math.max(1, Math.min(1000, budget.deadline - this.now(), (error.resetsAt || Infinity) - this.now())));
+        });
+      }
+    }
+  }
   rules(key, resource, legacy = []) {
     if (!this.enabled) return [];
     if (!keyOk(key) || !resourceOk(resource)) throw frameworkError('用量必须绑定真实会话与资源');
@@ -106,7 +131,7 @@ export class UsageQuotas {
     const rules = this.rules(key, resource, legacy);
     if (!rules.length) return { check() {} };
     if (!Number.isSafeInteger(count) || count < 1 || count > 1000000) fail('用量次数无效');
-    const next = structuredClone(this.state), now = this.now(), notifications = [], leases = [];
+    const next = structuredClone(this.state), now = this.now(), notifications = [];
     // Prune obsolete, unblocked windows only. Outstanding reset requests survive.
     const activeIds = new Set(rules.map(r => r.id));
     next.buckets = next.buckets.filter(b => b.blocked || activeIds.has(b.id) || b.windowStart + b.windowMs > now);
@@ -121,7 +146,6 @@ export class UsageQuotas {
       if (b.used + count > b.limit) {
         throw this.denied(b);
       }
-      leases.push([b.id, b.resetRevision || 0]);
     }
     for (const rule of rules) {
       const b = next.buckets.find(b => b.id === rule.id); b.used += count;
@@ -131,10 +155,7 @@ export class UsageQuotas {
     for (const b of notifications) this.dispatch(b);
     const revision = this.revision;
     return { check: () => {
-      if (revision !== this.revision || leases.some(([id, resetRevision]) => {
-        const current = this.state.buckets.find(b => b.id === id);
-        return current && (current.resetRevision || 0) !== resetRevision;
-      })) throw frameworkError('用量授权已变更，请重新获取额度', 409);
+      if (revision !== this.revision) throw frameworkError('用量授权已变更，请重新获取额度', 409);
     } };
   }
   dispatch(bucket) {

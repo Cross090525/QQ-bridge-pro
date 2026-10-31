@@ -5,7 +5,7 @@ export function buildDebateInput(task, events, previousResponses = [], { context
   if (!events.length) throw new Error('没有可分析的消息');
   const messages = selectDebateBatch(events);
   const shared = Object.fromEntries(['messages', 'topics', 'media', 'recentReplies'].filter(k => context[k] !== undefined).map(k => [k, context[k]]));
-  return { phase: 'analysis', topic: task.topic, targetId: task.targetId, messages, context: shared, debateState, hasMore,
+  return { quotaFinalizing: task.quotaFinalizing === true, quotaNote: task.quotaFinalizing ? '额度等待已达5分钟，仅根据已有证据给出最后一次回应，明确未取得的信息。' : '', phase: 'analysis', topic: task.topic, targetId: task.targetId, messages, context: shared, debateState, hasMore,
     previousResponses: previousResponses.slice(-5).map(item => ({ text: String(item.text ?? '').slice(0, 1000), verdict: item.verdict, status: item.status,
       deliveredText: String(item.deliveredText || '').slice(0, 1500), partial: item.partial === true })) };
 }

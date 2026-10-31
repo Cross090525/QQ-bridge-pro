@@ -22,7 +22,7 @@ export async function processDebateBatch({ client, analyzer, workerId, signal, p
     requestId: randomUUID(), requestSeq: current.lastRequestSeq + 1 });
   previousResponses.push({ text: result.draft.text, verdict: result.draft.verdict, status: result.draft.status });
   if (previousResponses.length > 5) previousResponses.shift();
-  return result;
+  return { ...result, quotaFinalizing: task.quotaFinalizing === true };
 }
 
 export async function runDebateWorker({ client, analyzer, signal, onResult = () => {} }) {
@@ -61,6 +61,7 @@ export async function runDebateWorker({ client, analyzer, signal, onResult = () 
         const result = await processDebateBatch({ client, analyzer, workerId, signal: active.signal, previousResponses,
           onBatch: batch => { activeBatch = batch; } });
         state = 'idle'; onResult(result);
+        if (result.quotaFinalizing) break;
         if (result.idle) await delay(1000, undefined, { signal });
       } catch (failure) {
         if (signal?.aborted) break;

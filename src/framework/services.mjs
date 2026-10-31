@@ -122,7 +122,7 @@ export class ContentServiceRuntime {
     if (source ? !this.matches(service, source) : !service.accepts.includes('text')) throw frameworkError('服务不支持此输入来源');
     if (!source && (typeof input.text !== 'string' || !input.text.trim())) throw frameworkError('文本服务需要 input.text');
     assertLive();
-    const permit = this.permissions.authorize({ key, scope, capability: serviceId, manifest: serviceManifest(service), source, input, approvalId,
+    const permit = await this.permissions.authorizeAsync({ key, scope, capability: serviceId, manifest: serviceManifest(service), source, input, approvalId,
       dataScopes: serviceDataScopes(service, source, input), assertLive,
       currentManifest: () => serviceManifest(this.services.find(item => item.id === serviceId) ?? { effect: 'execute', description: '', transport: { type: 'http', url: '' } }) });
     if (permit.pending) return permit.pending;
@@ -133,7 +133,9 @@ export class ContentServiceRuntime {
     // Never deduplicate approved side effects into a different execution.
     if (this.inflight.has(signature)) { permit.finish('busy'); throw frameworkError('相同内容服务请求正在执行', 409); }
     if (this.inflight.size >= 4) { permit.finish('busy'); throw frameworkError('识别服务繁忙，请稍后重试', 429); }
-    const usage = this.beforeExecute({ key, service, source });
+    const usage = await this.beforeExecute({ key, service, source });
+    checkPermit();
+    if (this.inflight.has(signature) || this.inflight.size >= 4) { permit.finish('busy'); throw frameworkError('识别服务繁忙，请稍后重试', 429); }
     let expired = false;
     let timer;
     const check = () => { if (expired) throw frameworkError('服务调用已超时', 504); checkPermit(); usage?.check(); };

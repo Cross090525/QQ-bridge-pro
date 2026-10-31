@@ -35,7 +35,7 @@ export class DebateTasks {
       lastEventId: task.nextEvent, oldestEventId: task.events[0]?.id ?? null,
       lastRequestSeq: task.lastRequestSeq ?? 0,
       processedThrough: task.processedThrough ?? 0,
-      protocolVersion: 2, managedWorker: task.managedWorker === true, includeContext: task.includeContext, contextVersion: this.contextVersion(task),
+      quotaFinalizing: task.quotaFinalizing === true, protocolVersion: 2, managedWorker: task.managedWorker === true, includeContext: task.includeContext, contextVersion: this.contextVersion(task),
       needsReassessment: !!task.lastAnalysis && task.processedThrough >= task.nextEvent && task.lastAnalysis.contextVersion !== this.contextVersion(task),
       debateState: structuredClone(task.debateState),
       worker: { online: task.status === 'active' && task.expiresAt > this.now() && !!task.worker && task.worker.state !== 'stopped' && this.now() - task.worker.lastSeenAt < 6000,

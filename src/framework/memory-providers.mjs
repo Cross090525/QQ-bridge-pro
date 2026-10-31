@@ -180,7 +180,7 @@ export class MemoryProviderRuntime {
     };
     const request = { protocol: MEMORY_PROTOCOL, operation, namespace: this.namespace(provider.id, key), input: payload,
       requestId: permissionDigest({ key, scope, operation, payload, provider: manifest.configHash, revision: this.permissions.revision }) };
-    const permit = this.permissions.authorize({ key, scope, capability: `memory.${provider.id}.${operation}`, manifest,
+    const permit = await this.permissions.authorizeAsync({ key, scope, capability: `memory.${provider.id}.${operation}`, manifest,
       input: request, dataScopes: memoryDataScopes(operation), approvalId, assertLive: check,
       currentManifest: () => { const current = this.providers.find(item => item.id === provider.id); return current ? publicManifest(current, operation) : {}; } });
     if (permit.pending) return permit.pending;

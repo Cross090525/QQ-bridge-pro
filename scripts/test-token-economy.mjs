@@ -394,7 +394,7 @@ await test('a compact image handle still resolves after unread outlives the rece
     assert.equal(result.data.images[0].mimeType, 'image/png');
     assert.ok(result.data.images[0].data.length > 0, 'fixture gateway should return an actual image');
   }
-  assert.deepEqual(h.calls.images, ['fixture-kept-image', 'fixture-kept-image']);
+  assert.deepEqual(h.calls.images, ['fixture-kept-image'], 'retained media handles reuse completed image reads');
 });
 
 await test('busy and rate-limited wake attempts preserve the current observation state', async ({ h, st, append }) => {

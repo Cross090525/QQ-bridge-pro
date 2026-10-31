@@ -104,6 +104,10 @@ export class WorkingMemory {
     for (const k of LISTS) for (const item of packet[k]) for (const id of item.sources) receipt.ids.add(id);
     for (const m of packet.media) if (m.status === 'understood' || preparedSources.includes(m.sourceId)) receipt.media.add(m.sourceId);
     const current = this.get(key);
+    // Visual batches can include sources outside the bounded textual snapshot.
+    // Acknowledge exactly the evidence attached by the bridge, still scoped to
+    // prepared media belonging to this conversation.
+    for (const sourceId of preparedSources) if (current.media.some(m => m.sourceId === sourceId && ['prepared', 'understood'].includes(m.status))) receipt.media.add(sourceId);
     const valid = new Set([...current.messages.map(m => m.id), ...LISTS.flatMap(k => current[k].flatMap(item => item.sources))]);
     receipt.ids = new Set([...receipt.ids].filter(id => valid.has(id))); this.receipts.set(key, receipt);
   }

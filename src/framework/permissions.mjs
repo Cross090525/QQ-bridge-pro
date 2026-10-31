@@ -104,6 +104,11 @@ export class ExtensionPermissions {
     request.status = decision === 'approve' ? 'approved' : 'denied';
     return this.publicRequest(request, true);
   }
+  async authorizeAsync(request) {
+    return this.quotas ? this.quotas.waitFor(() => this.authorize(request), {
+      ...this.quotaContext?.(request.key), assertLive: request.assertLive,
+    }) : this.authorize(request);
+  }
   authorize({ key, scope, capability, manifest, source = null, input = {}, dataScopes = [], approvalId,
     assertLive = () => {}, currentManifest = () => manifest }) {
     this.prune(); assertLive();

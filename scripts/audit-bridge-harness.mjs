@@ -171,7 +171,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   bot.onPrivateMessage(async (event) => {`);
   const timers = new Set();
   const context = vm.createContext({
-    fs, os, path, http, crypto, AsyncLocalStorage, fileURLToPath, URL, Buffer, AbortSignal, console: { log() {}, error() {} },
+    fs, os, path, http, crypto, AsyncLocalStorage, fileURLToPath, URL, Buffer, AbortSignal, AbortController, console: { log() {}, error() {} },
     fetch: fakeFetch,
     // 锁文件探测用（bridge.js 顶层的 consolePortInUse）；
     // 固定桩掉：测试不应该真去 netstat 宿主机。
@@ -188,7 +188,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...dualMode, ...contextQuery, ...publicApi, WorkingMemory, ObservationQueue, observationServices,
     ...frameworkContent, FrameworkMediaStore, ContentServiceRuntime, ...extensionPermissionsModule, MemoryProviderRuntime, ...memoryCompat, DebateTasks, handleDebateApi, projectDebateContext,
     DebateRequests, normalizeDebateWake, ManagedDebateWorkers, spawn: () => { throw Error('fixture forbids real worker spawning'); },
-    UsageQuotas, normalizeQuotaConfig, QUOTA_RESOURCES,
+    UsageQuotas: class extends UsageQuotas { constructor(options) { super({ ...options, waitMs: 0 }); } }, normalizeQuotaConfig, QUOTA_RESOURCES,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),

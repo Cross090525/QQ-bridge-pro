@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { test } from 'node:test';
+import { EventEmitter } from 'node:events';
 import { z } from 'zod';
 
 function loadWebTools({ safeFetch, webSearch }) {
@@ -114,7 +115,16 @@ function loadSnowlumaTools(fetchImpl, fixtureConfig = null, httpImpl = null) {
     URLSearchParams,
     fetch: fetchImpl,
     AbortSignal,
-    http: httpImpl ?? { request: () => { throw new Error('test did not inject http'); } },
+    http: httpImpl ?? { request: (options, callback) => {
+      const req = new EventEmitter(); let body = '';
+      req.write = chunk => { body += chunk; return true; };
+      req.destroy = () => {};
+      req.end = () => { Promise.resolve(fetchImpl(`http://${options.hostname}:${options.port}${options.path}`, { method: options.method, headers: options.headers, body }))
+        .then(async response => { const res = new EventEmitter(); res.statusCode = response.status; res.destroy = () => {}; callback(res);
+          const bytes = Buffer.from(await response.arrayBuffer()); res.emit('data', bytes); res.complete = true; res.emit('end'); })
+        .catch(error => req.emit('error', error)); };
+      return req;
+    } },
     process,
     setTimeout,
     clearTimeout,
