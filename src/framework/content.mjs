@@ -87,6 +87,10 @@ export function normalizeIncomingContent(key, messageId, segments) {
       addSource(type, {
         url: publicContentUrl(data.url), file: typeof data.file === 'string' ? data.file.slice(0, 2000) : '',
         faceId: segment.type === 'face' ? String(data.id ?? '') : '',
+        ...(type === 'image' || type === 'sticker' ? {
+          emojiId: String(data.emoji_id ?? '').slice(0, 128), subType: String(data.sub_type ?? '').slice(0, 16),
+          summary: String(data.summary ?? '').slice(0, 160),
+        } : {}),
         duration: Number.isFinite(Number(data.duration)) ? Number(data.duration) : null,
       }, data.summary || data.name || type);
     }

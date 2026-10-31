@@ -2229,6 +2229,13 @@ button:active:not(:disabled) {
 
       </div></details>
 <details class="settings-group" id="debatePanel"><summary>争论辅助</summary><div class="settings-content"><p>管理员指定群、对象、议题和有效期，可一次授权任务内自动发言。不设发送冷却或次数上限。</p><button type="button" onclick="location.href='/debate?token='+encodeURIComponent(localStorage.getItem('consoleToken')||'')">打开争论任务管理</button></div></details>
+<details class="settings-group" id="workingMemoryPanel"><summary>实时工作记忆</summary><div class="settings-content">
+<p class="meta">持续理解近期聊天、媒体与话题，再决定是否发言。每个群独立保存；长期记忆仍使用下方提供者。</p>
+<div class="row"><label style="display:flex;align-items:center;gap:8px;flex:1;width:auto"><input type="checkbox" id="workingMemoryEnabled" style="width:auto;flex:none"> 自动观察与实时工作记忆</label><button id="workingMemorySave" class="small">保存观察设置</button></div>
+<div class="row"><input id="workingMemoryKey" type="text" placeholder="group:群号" style="flex:1"><button id="workingMemoryLoad" class="small">查看当前记忆</button><span class="meta" id="workingMemoryMsg"></span></div>
+<div id="workingMemorySummary" style="white-space:pre-wrap">选择会话并查看当前话题与参与状态。</div>
+<details><summary>查看来源与完整快照</summary><pre id="workingMemoryOutput">（尚未加载）</pre></details>
+</div></details>
 <details class="settings-group" id="extensionPermissionPanel"><summary>MCP / skills 授权与审批</summary><div class="settings-content">
       <p class="meta">普通扩展默认拒绝，write / execute 需逐次审批。本机记忆提供者若由管理员启用 automatic 模式，记忆操作可自动执行；显式 deny / ask 规则仍优先。群与会话隔离始终保留。</p>
       <div class="row">
@@ -3690,6 +3697,28 @@ async function loadV2Memory() {
   try { renderV2Memory(await memoryConsoleRequest('/api/socialV2/memory?key=' + encodeURIComponent(key))); }
   catch (error) { msg.textContent = error.message; msg.className = 'meta err'; }
 }
+async function loadWorkingMemorySettings() {
+  try { const r = await api('/api/socialV2/config'); document.getElementById('workingMemoryEnabled').checked = r.config?.workingMemory?.enabled !== false; } catch {}
+}
+document.getElementById('workingMemorySave').addEventListener('click', async () => {
+  const r = await api('/api/socialV2/config', 'POST', { workingMemory: { enabled: document.getElementById('workingMemoryEnabled').checked } });
+  document.getElementById('workingMemoryMsg').textContent = r.ok ? '已保存，下批消息生效' : (r.error || '保存失败');
+});
+document.getElementById('workingMemoryLoad').addEventListener('click', async () => {
+  const key = document.getElementById('workingMemoryKey').value.trim(); if (!key) return;
+  const r = await api('/api/socialV2/working-memory?key=' + encodeURIComponent(key));
+  document.getElementById('workingMemoryOutput').textContent = JSON.stringify(r.snapshot || r, null, 2);
+  const s = r.snapshot;
+  const actions = { observe: '继续观察', need_context: '需要补充信息', reply: '准备发言（是否实际发送以聊天记录为准）' };
+  document.getElementById('workingMemorySummary').textContent = s
+    ? ['当前话题：' + (s.topics.map(t => t.text).join('；') || '尚未整理'),
+      '未完成问题：' + (s.questions.filter(q => q.status !== 'resolved').map(q => q.text).join('；') || '暂无记录'),
+      '媒体：' + s.media.length + ' 条记录，其中已理解 ' + s.media.filter(m => m.status === 'understood').length + ' 条',
+      '待判断的新消息：' + s.pendingCount + ' 条',
+      '上次决策：' + (actions[s.decision?.action] || '尚未判断') + (s.decision?.note ? '，' + s.decision.note : '')].join('\n')
+    : (r.error || '无法读取当前记忆');
+});
+loadWorkingMemorySettings();
 document.getElementById('v2MemoryLoad').addEventListener('click', loadV2Memory);
 document.getElementById('v2MemoryClearAll').addEventListener('click', async () => {
   const key = document.getElementById('v2MemoryKey').value.trim(); if (!key || !confirm('申请清空该会话在默认提供者中的全部记忆？仍需独立审批。')) return;
@@ -3891,6 +3920,7 @@ document.getElementById('v2SessionSelect').addEventListener('change', (ev) => {
   const key = ev.target.value;
   if (!key) return;
   document.getElementById('v2StateKey').value = key;
+  document.getElementById('workingMemoryKey').value = key;
   document.getElementById('v2MemoryKey').value = key;
   document.getElementById('v2WakeKey').value = key;
   document.getElementById('v2InitPromptKey').value = key;

@@ -8,6 +8,7 @@ export const PUBLIC_API_ROUTES = Object.freeze([
   { method: 'POST', path: '/api/v1/content/send', target: '/api/socialV2/content-send', flag: 'contentSend' },
   { method: 'GET', path: '/api/v1/media/read', target: '/api/socialV2/content-media', flag: 'contentServices' },
   { method: 'POST', path: '/api/v1/media/upload', target: '/api/socialV2/content-upload', flag: 'contentServices' },
+  ...['GET', 'POST'].map(method => ({ method, path: '/api/v1/working/context', target: '/api/socialV2/working-memory', flag: 'contextQuery' })),
   { method: 'GET', path: '/api/v1/capabilities', target: '/api/bridge/capabilities', flag: null },
   { method: 'POST', path: '/api/v1/context/query', target: '/api/socialV2/context-query', flag: null },
   { method: 'GET', path: '/api/v1/messages/unread', target: '/api/socialV2/unread', flag: 'getUnread' },

@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const tests = [
-  'test-context-api.mjs',
+  'test-context-api.mjs', 'test-working-memory.mjs',
   'test-content-framework.mjs',
   'test-extension-permissions.mjs',
   'test-memory-providers.mjs',
