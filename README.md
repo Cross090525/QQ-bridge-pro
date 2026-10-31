@@ -4,7 +4,7 @@
 
 把 QQ 群聊和私聊接入 DeepSeek Harness（DSH），让 Agent 根据任务按需读取上下文、调用内容服务与记忆插件，再通过 QQ 回复。
 
-**本项目基于 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 扩展开发，结合 DSH、SnowLuma、dsh-bilibili、Haitang 等项目的成果。** 原版桥接提供了 QQ 与 DSH 的主链路、聊天模式、工具约束和控制台；本仓库在此基础上补充开放接口、统一内容服务、外部记忆路由、扩展审批和按时间继续取证。上游模块与模型的成果归各原项目，具体见下方“致谢与来源”。
+**本项目基于 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 扩展开发，结合 DSH、SnowLuma、dsh-video-storyboard、Haitang 等项目的成果。** 原版桥接提供了 QQ 与 DSH 的主链路、聊天模式、工具约束和控制台；本仓库在此基础上补充开放接口、统一内容服务、外部记忆路由、扩展审批和按时间继续取证。上游模块与模型的成果归各原项目，具体见下方“致谢与来源”。
 
 ## 当前能力
 
@@ -14,7 +14,7 @@
 | 按需上下文 | 二代仿真默认不在每次唤醒时打包黑话、人物印象和聊天快照；按需查询历史、黑话、人设及外部记忆 |
 | 开放接口 | 当前会话范围的 API v1、无依赖 `QQBridgeClient`、外部 MCP / skill runner 示例 |
 | 内容服务 | 入站内容提供类型与 `sourceId`；Agent 选择已注册的固定 MCP / HTTP 服务，不自动识别全部消息 |
-| 视频与动图 | B站字幕、分段音轨识别、均匀/场景抽帧、绝对时间点取帧与下一段参数；收到的视频和 GIF/WebP 按需处理 |
+| 视频与动图 | dsh-video-storyboard编号分镜、时间码、字幕与本机转写；分段续看和zoom复查，支持B站、收到的视频与GIF/WebP |
 | 语音识别 | QQ语音优先经网关转 WAV，使用本机 SenseVoice；不需要新增云端ASR账户 |
 | 统一输出 | 文字、链接、图片、表情包、语音句柄；**尚未接入语音生成/TTS提供者** |
 | 开放记忆 | 内置记忆模块由可替换 HTTP / MCP 提供者取代，提供 Haitang 适配器和分会话命名空间 |
@@ -90,9 +90,9 @@ const client = new QQBridgeClient({
   timeoutMs: 190000,
 });
 await client.contentServices(sourceId);
-await client.processContent('bilibili.frames', {
+await client.processContent('bilibili.storyboard', {
   sourceId,
-  input: { sampling: 'scene', startSeconds: 120, durationSeconds: 30, maxFrames: 4 },
+  input: { startSeconds: 120, durationSeconds: 30, cells: 4, need: 'scene' },
 });
 ```
 
@@ -387,8 +387,8 @@ SnowLuma 同一个账号的 **HTTP token（默认 3000 端口）与 WebSocket to
 
 ## 能力边界与排查
 
-- 视频理解由字幕/分段ASR与少量抽样帧组合，不是连续全片观看。场景检测是低清画面变化候选，不保证语义镜头划分；转写时间戳是片段边界，不是逐字对齐。
-- 默认视频总长最多30分钟，单次转写/场景扫描最多180秒、输出最多6张且最大边长640像素；B站纯视频轨下载上限96 MiB、音轨16 MiB，QQ原始媒体8 MiB。下一段仍可能重新下载，完整限制见 [媒体服务](docs/guides/VIDEO_SERVICES.md)。
+- 视频理解使用dsh-video-storyboard的自适应编号分镜、台词和时间码，仍为抽样证据。普通分镜最多180秒，zoom最多30秒；本机转写时间戳是片段边界，不是逐字对齐。
+- 视频总长最多30分钟，默认每张分镜120万像素，cells最多9格；B站纯视频轨下载上限96 MiB、音轨16 MiB，QQ原始媒体8 MiB。下一段仍可能重新下载，完整限制见 [媒体服务](docs/guides/VIDEO_SERVICES.md)。
 - 语音识别已实现，但没有接入语音生成/TTS提供者。输出语音句柄和发送已有音频不等于生成语音；现有AI语音发送默认关闭。
 - 没有接入夸克视频理解；QQ旧媒体URL可能失效，届时需要重新发送。
 - 近期消息缓冲、DSH会话历史、外部长期记忆是三种不同数据。automatic记忆授权不等于自动全量采集聊天。
@@ -411,7 +411,8 @@ SnowLuma 是独立第三方项目，与腾讯/QQ 无隶属关系，仅供学习�
 | [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 及原贡献者 | 本仓库的直接基础：QQ↔DSH主链路、聊天模式、预设守卫、控制台、角色、黑话与表情功能。保留原作者署名和版权信息 |
 | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | Agent运行时、模型会话、工具调用、预设和事件流；本仓库适配其接口 |
 | [SnowLuma](https://github.com/SnowLuma/SnowLuma) 与 OneBot 生态 | QQ接入、HTTP/WebSocket消息协议、媒体与发送能力；本仓库连接已运行网关 |
-| [CZX2244/dsh-bilibili](https://github.com/CZX2244/dsh-bilibili) | 复用独立视频提取模块获取B站元信息与字幕，再适配会话引用、授权和证据返回 |
+| [SAOS-3624/dsh-video-storyboard](https://github.com/SAOS-3624/dsh-video-storyboard) | 当前视频理解的分镜、镜头检测、清晰帧选择与时间轴实现（Apache-2.0） |
+| [CZX2244/dsh-bilibili](https://github.com/CZX2244/dsh-bilibili) | 历史视频提取方案的来源；当前运行时已移除该依赖 |
 | [haitang1/dsh-memory](https://github.com/haitang1/dsh-memory) | 复用 `lib/store.js` 的本地存储与词法/模糊检索；本仓库增加统一协议与分会话命名空间，不加载宿主自动注入钩子 |
 | [FFmpeg](https://ffmpeg.org/) / ffprobe | 媒体探测、解码、抽帧与音频格式转换 |
 | [SenseVoice](https://github.com/FunAudioLLM/SenseVoice)、[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)、[ONNX Runtime](https://onnxruntime.ai/) | 语音识别模型、推理接口与运行时；本仓库补充分段调度和QQ语音适配 |

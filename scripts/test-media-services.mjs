@@ -5,327 +5,162 @@ import path from 'node:path';
 import os from 'node:os';
 import { test } from 'node:test';
 import { PNG } from 'pngjs';
-import { LocalMediaEngine, mediaPaths, runMedia, decodeSource, frameTimes, fitTranscript } from '../integrations/media-engine.mjs';
-import { BridgeMediaProvider, bilibiliSourceUrl, mediaFailure, MAX_BILIBILI_VIDEO_BYTES } from '../integrations/media-provider.mjs';
+import { LocalMediaEngine, mediaPaths, runMedia, decodeSource } from '../integrations/media-engine.mjs';
+import { StoryboardMediaEngine, validateStoryboardInput } from '../integrations/storyboard-engine.mjs';
+import { BridgeMediaProvider, bilibiliSourceUrl, mediaFailure } from '../integrations/media-provider.mjs';
 import { bilibiliFetch, mediaRequestHeaders } from '../integrations/media-network.mjs';
 import { buildMediaServices } from '../integrations/media-services.mjs';
+import { migrateMediaServices } from './setup-media-services.mjs';
 import { ContentServiceRuntime } from '../src/framework/services.mjs';
 import { ExtensionPermissions } from '../src/framework/permissions.mjs';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 import { QQBridgeClient } from '../src/bridge-client.mjs';
 
-const runtime = mediaPaths();
-const installed = fss.existsSync(runtime.ffmpeg) && fss.existsSync(runtime.ffprobe);
-async function fixtures(run) {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-media-test-'));
-  const engine = new LocalMediaEngine({ temporaryRoot: directory });
+const binaries = mediaPaths();
+async function fixture(run) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-storyboard-test-'));
+  const engine = new StoryboardMediaEngine({ temporaryRoot: directory });
   try {
-    const raw = Buffer.concat([[240, 10, 10], [10, 240, 10], [10, 10, 240]].map(color => {
-      const b = Buffer.alloc(64 * 64 * 3); for (let i = 0; i < b.length; i += 3) for (let j = 0; j < 3; j++) b[i + j] = color[j]; return b;
-    }));
-    await fs.writeFile(path.join(directory, 'frames.rgb'), raw);
+    // Three different scenes plus an audio track exercise actual upstream HSV scan,
+    // sharp frame selection, audio filters and PNG encoding without external media.
     const video = path.join(directory, 'clip.mp4'), gif = path.join(directory, 'clip.gif');
-    await runMedia(runtime.ffmpeg, ['-v', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '64x64', '-r', '1', '-i', path.join(directory, 'frames.rgb'), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-threads', '1', '-y', video]);
-    await runMedia(runtime.ffmpeg, ['-v', 'error', '-i', video, '-threads', '1', '-y', gif]);
-    const wav = Buffer.alloc(44 + 16000 * 2);
-    wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
-    wav.writeUInt32LE(16000, 24); wav.writeUInt32LE(32000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(wav.length - 44, 40);
+    await runMedia(binaries.ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=160x90:r=10:d=2',
+      '-f', 'lavfi', '-i', 'color=c=green:s=160x90:r=10:d=2', '-f', 'lavfi', '-i', 'color=c=blue:s=160x90:r=10:d=2',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=16000:duration=6', '-filter_complex', '[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]',
+      '-map', '[v]', '-map', '3:a', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-threads', '1', '-y', video]);
+    await runMedia(binaries.ffmpeg, ['-v', 'error', '-i', video, '-an', '-threads', '1', '-y', gif]);
+    const wav = Buffer.alloc(44 + 16000 * 2); wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8);
+    wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(16000, 24);
+    wav.writeUInt32LE(32000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(wav.length - 44, 40);
     await run({ engine, directory, video: await fs.readFile(video), gif: await fs.readFile(gif), wav });
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
 
-test('media inputs reject arbitrary paths, invalid URLs, malformed bytes and unbounded sampling', () => {
-  for (const url of ['https://bilibili.com.evil.test/video/BV1xx411c7mD', 'http://www.bilibili.com/video/BV1xx411c7mD', 'https://user:pass@www.bilibili.com/video/BV1xx411c7mD', 'https://www.bilibili.com/read/1']) {
-    assert.throws(() => bilibiliSourceUrl({ type: 'link', url }));
-  }
-  assert.throws(() => decodeSource({ file: 'C:/private/video.mp4' }), /base64/);
-  assert.throws(() => decodeSource({ data: Buffer.from('#EXTM3U\nfile:///private/file').toString('base64') }), /格式/);
-  assert.throws(() => frameTimes(10, { maxFrames: 7 }), /1–6/);
-  assert.throws(() => frameTimes(10, { timestamps: '2,NaN' }), /范围/);
-  assert.throws(() => frameTimes(10, { timestamps: '10' }), /范围/);
-  assert.deepEqual(frameTimes(10, { maxFrames: 4 }), [0, 2.5, 5, 7.5]);
+test('retired video tools are absent; storyboard inputs cannot select paths, URLs, backends or unbounded work', async () => {
+  assert.deepEqual(buildMediaServices().map(s => s.id), ['bilibili.storyboard', 'media.storyboard', 'media.transcript']);
+  for (const input of [{ input: '/private/video' }, { url: 'https://evil.test' }, { ffmpegPath: 'sh' }, { cells: 10 },
+    { durationSeconds: 181 }, { mode: 'zoom', durationSeconds: 31 }, { startSeconds: -1 }, { asr: 'true' }]) assert.throws(() => validateStoryboardInput(input));
+  for (const url of ['https://bilibili.com.evil.test/video/BV1xx411c7mD', 'http://bilibili.com/video/BV1xx411c7mD', 'https://a:b@bilibili.com/video/BV1xx411c7mD']) assert.throws(() => bilibiliSourceUrl({ type: 'link', url }));
+  const provider = new BridgeMediaProvider();
+  for (const tool of ['media_frames', 'bilibili_frames', 'bilibili_transcript']) await assert.rejects(provider.call(tool, { source: { type: 'video' } }), /未知/);
+  assert.throws(() => decodeSource({ file: '/private/file' }), /base64/);
+  const bytes = Buffer.alloc(7 * 1024 * 1024); bytes.write('GIF89a'); assert.ok(decodeSource({ data: bytes.toString('base64') }).equals(bytes));
+  for (const data of ['R0lGODlh=', 'R0lGODlhAB==', 'R0lGODlh\n']) assert.throws(() => decodeSource({ data }), /base64/);
 });
 
-test('native media subprocesses stop on timeout and oversized output', async () => {
-  await assert.rejects(runMedia(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { timeoutMs: 80 }), /超时|取消/);
-  await assert.rejects(runMedia(process.execPath, ['-e', "process.stdout.write('x'.repeat(10000))"], { maxOutput: 100, timeoutMs: 2000 }), /超时|取消/);
+test('migration removes legacy services, preserves unrelated extensions, existing deny/ask and account env mapping', () => {
+  const old = { allow: { groups: ['456'] }, framework: { services: [{ id: 'media.frames' }, { id: 'custom.service' },
+    { id: 'bilibili.frames', transport: { envFrom: { BILIBILI_SESSDATA: 'MY_BILI_COOKIE' } } }], permissions: { rules: [
+      { key: 'group:456', capability: 'bilibili.frames', decision: 'allow' }, { key: 'group:456', capability: 'bilibili.transcript', decision: 'deny' },
+      { key: 'group:456', capability: 'media.frames', decision: 'ask', maxCallsPerMinute: 2 } ] } } };
+  const updated = migrateMediaServices(old, buildMediaServices());
+  assert.ok(updated.framework.services.some(s => s.id === 'custom.service'));
+  assert.ok(!updated.framework.services.some(s => s.id === 'media.frames'));
+  assert.equal(updated.framework.permissions.rules.find(r => r.capability === 'bilibili.storyboard').decision, 'deny');
+  assert.equal(updated.framework.permissions.rules.find(r => r.capability === 'media.storyboard').decision, 'ask');
+  assert.equal(updated.framework.permissions.rules.find(r => r.capability === 'media.storyboard').maxCallsPerMinute, 2);
+  assert.deepEqual(updated.framework.services.find(s => s.id === 'bilibili.storyboard').transport.envFrom, { BILIBILI_SESSDATA: 'MY_BILI_COOKIE' });
+  assert.deepEqual(migrateMediaServices(updated, buildMediaServices()), updated);
+  assert.equal(migrateMediaServices({}, buildMediaServices()).framework.permissions.rules.length, 0);
 });
 
-test('long escaped transcripts fit the framework text limit and retain coverage with truncation flags', () => {
-  const value = fitTranscript({ text: '\\"\n'.repeat(5000), segments: Array.from({ length: 36 }, (_, i) => ({ start: i * 5, end: i * 5 + 5, text: '\\"\n'.repeat(1000) })),
-    startSeconds: 0, endSeconds: 180, nextInput: { startSeconds: 180 } });
-  assert.ok(JSON.stringify(value).length <= 15000); assert.equal(value.textTruncated, true);
-  assert.equal(value.timelineTruncated, true); assert.equal(value.segments.length, 36);
-  assert.equal(value.nextInput.startSeconds, 180);
-});
-
-test('multi-megabyte GIF base64 validates without stack overflow while malformed padding stays rejected', () => {
-  const bytes = Buffer.alloc(7 * 1024 * 1024); bytes.write('GIF89a');
-  assert.ok(decodeSource({ data: bytes.toString('base64') }).equals(bytes));
-  for (const data of ['R0lGODlh=', 'R0lGODlhAB==', 'R0lG=DhhaQ==', 'R0lGODlh\n']) {
-    assert.throws(() => decodeSource({ data }), /base64/);
-  }
-});
-
-test('B站 transport pins checked addresses, strips CDN cookies and rejects foreign redirect hops', async () => {
-  assert.equal(mediaRequestHeaders(new URL('https://api.bilibili.com/x'), { Cookie: 'session-fixture' }).cookie, 'session-fixture');
-  assert.equal(mediaRequestHeaders(new URL('https://a.bilivideo.com/file'), { Cookie: 'session-fixture', Authorization: 'private' }).cookie, undefined);
-  assert.equal(mediaRequestHeaders(new URL('https://a.bilivideo.com/file'), { Authorization: 'private' }).authorization, undefined);
+test('B站 transport pins public addresses, rejects foreign redirects and never forwards account cookies to CDN', async () => {
+  assert.equal(mediaRequestHeaders(new URL('https://api.bilibili.com/x'), { Cookie: 'fixture' }).cookie, 'fixture');
+  assert.equal(mediaRequestHeaders(new URL('https://cdn.bilivideo.com/file'), { Cookie: 'fixture', Authorization: 'private' }).cookie, undefined);
   const seen = [];
-  const validate = async raw => ({ url: new URL(raw), addresses: ['93.184.216.34'] });
-  const requestImpl = async (url, address) => { seen.push([url.host, address]); return { status: 302, location: 'https://127.0.0.1/private' }; };
-  await assert.rejects(bilibiliFetch('https://b23.tv/fixture', {}, { validate, requestImpl }), /非允许/);
+  await assert.rejects(bilibiliFetch('https://b23.tv/fixture', {}, { validate: async raw => ({ url: new URL(raw), addresses: ['93.184.216.34'] }),
+    requestImpl: async (url, address) => { seen.push([url.hostname, address]); return { status: 302, location: 'https://127.0.0.1/private' }; } }), /非允许/);
   assert.deepEqual(seen, [['b23.tv', '93.184.216.34']]);
-  await assert.rejects(bilibiliFetch('https://api.bilibili.com/x', { method: 'POST', body: '{}' }, { validate, requestImpl }), /转写接口/);
-  await assert.rejects(bilibiliFetch('https://api.bilibili.com/x', {}, { validate: async () => { throw Error('private DNS'); }, requestImpl }), /private DNS/);
+  assert.equal(mediaFailure(Error('https://secret:password@private')).code, 'MEDIA_PROCESSING_FAILED');
+  assert.ok(!JSON.stringify(mediaFailure(Error('password'))).includes('password'));
 });
 
-test('B站 text-first extraction disables frames/vision and declares no picture evidence', async () => {
-  let options;
-  const provider = new BridgeMediaProvider({ extractAll: async value => { options = value; return { success: true, metadata: { title: '测试', duration: 20, uploader: { name: '作者' } }, transcript: { source: 'subtitle', text: '字幕只描述了一部分画面' } }; } });
-  const result = await provider.call('bilibili_transcript', { source: { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, input: { asr: false } });
-  assert.equal(options.extractFrames, false); assert.equal(options.visionProvider, 'none'); assert.equal(options.asrProvider, 'none');
-  assert.deepEqual(result.evidence, ['metadata', 'transcript']);
-  assert.match(result.content[0].text, /未读取画面/);
-  assert.equal(JSON.parse(result.content[0].text).title, '测试');
-  assert.equal(JSON.parse(result.content[0].text).uploader, '作者');
-  await assert.rejects(fs.access(options.framesDir));
-  await assert.rejects(provider.call('bilibili_transcript', { source: {}, input: { command: 'pwsh' } }), /未声明参数/);
-});
-
-test('B站 missing subtitles use bounded local audio fallback and disclose partial coverage', async () => {
-  let calls = 0;
-  const provider = new BridgeMediaProvider({
-    extractAll: async () => ({ success: true, video: { duration: 300 }, transcript: {} }),
-    engine: { transcript: async (bytes, input) => {
-      calls++; assert.equal(bytes.toString(), 'audio'); assert.equal(input.durationSeconds, 120);
-      return { content: [{ type: 'text', text: JSON.stringify({ text: '识别结果', startSeconds: 0, endSeconds: 120, totalDuration: 300, truncated: true }) }] };
-    } },
-    fetchImpl: async (url, _options, limits) => {
-      if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 42, duration: 300 } });
-      if (url.includes('/playurl?')) return Response.json({ code: 0, data: { dash: { audio: [{ baseUrl: 'https://foreign.test/audio', backupUrl: ['https://cdn.bilivideo.com/audio'] }] } } });
-      assert.equal(new URL(url).hostname, 'cdn.bilivideo.com'); assert.equal(limits.maxBytes, 16 * 1024 * 1024);
-      return new Response('audio');
-    }
-  });
-  const source = { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' };
-  const result = await provider.call('bilibili_transcript', { source });
-  const value = JSON.parse(result.content[0].text);
-  assert.equal(value.transcript.source, 'sensevoice-local'); assert.match(value.transcript.note, /仅覆盖部分音轨/);
-  assert.equal(value.transcript.timeline[0].end, 120); assert.equal(calls, 1);
-  assert.equal(value.audio.status, 'processed'); assert.ok(result.evidence.includes('audio'));
-  const disabled = await provider.call('bilibili_transcript', { source, input: { asr: false } });
-  assert.deepEqual(disabled.evidence, ['metadata']); assert.equal(calls, 1);
-  assert.equal(JSON.parse(disabled.content[0].text).audio.status, 'not_requested');
-});
-
-test('Bilibili audio selects the smallest track and passes explicit recognition windows', async () => {
-  const provider = new BridgeMediaProvider({ extractAll: async options => {
-    assert.equal(options.asrProvider, 'none'); return { success: true, metadata: { duration: 1494 }, transcript: {} };
-  }, engine: { transcript: async (_bytes, input) => {
-    assert.deepEqual(input, { startSeconds: 500, durationSeconds: 30 });
-    return { content: [{ type: 'text', text: JSON.stringify({ text: '片段识别', startSeconds: 500, endSeconds: 530, totalDuration: 1494, truncated: true }) }] };
-  } }, fetchImpl: async url => {
-    if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 42, duration: 1494 } });
-    if (url.includes('/playurl?')) return Response.json({ code: 0, data: { dash: { audio: [
-      { bandwidth: 219805, baseUrl: 'https://cdn.bilivideo.com/large' },
-      { bandwidth: 65559, baseUrl: 'https://cdn.bilivideo.com/small' },
-    ] } } });
-    assert.equal(url, 'https://cdn.bilivideo.com/small'); return new Response('audio');
-  } });
-  const result = await provider.call('bilibili_transcript', { source: { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, input: { startSeconds: 500, durationSeconds: 30 } });
-  const value = JSON.parse(result.content[0].text);
-  assert.equal(value.audio.startSeconds, 500); assert.equal(value.audio.endSeconds, 530); assert.equal(value.audio.partial, true);
-  await assert.rejects(provider.call('bilibili_transcript', { source: { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, input: { durationSeconds: 181 } }), /时间范围/);
-});
-
-test('failed Bilibili audio recognition is distinct from silence and cannot be cached as success', async () => {
-  const provider = new BridgeMediaProvider({ extractAll: async () => ({ success: true, metadata: { title: '测试' }, transcript: {} }) });
-  provider.localTranscript = async () => { throw Error('private signed URL'); };
-  const result = await provider.call('bilibili_transcript', { source: { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' } });
-  const value = JSON.parse(result.content[0].text);
-  assert.equal(value.audio.status, 'failed'); assert.match(value.transcript.note, /不表示原视频没有声音/);
-  assert.equal(result.cacheable, false); assert.ok(!JSON.stringify(result).includes('private'));
-  const permissions = new ExtensionPermissions({ policy: { rules: [{ key: 'group:456', capability: 'audio.test', decision: 'allow', dataScopes: ['source-reference'] }] } });
-  const runtime = new ContentServiceRuntime({ permissions, services: [{ id: 'audio.test', effect: 'read', accepts: ['link'], transport: { type: 'http', url: 'http://127.0.0.1:9871/test' } }], fetchImpl: async () => Response.json(result) });
-  try { await runtime.call({ key: 'group:456', scope: 'test', serviceId: 'audio.test', source: { type: 'link', sourceId: 'a'.repeat(32), url: 'https://example.com' } }); assert.equal(runtime.cache.size, 0); }
-  finally { await runtime.close(); }
-});
-
-test('B站 frame mode downloads bounded public media before decoding, never hands URLs to FFmpeg', async () => {
-  let received;
-  const fakeVideo = Buffer.alloc(16); fakeVideo.write('ftyp', 4);
-  const provider = new BridgeMediaProvider({ engine: { frames: async (bytes, input) => { received = { bytes, input }; return { content: [], evidence: ['frames'] }; } },
-    fetchImpl: async (url, _options, limits) => {
-      if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 42, duration: 30 } });
-      if (url.includes('/playurl?')) return Response.json({ code: 0, data: { durl: [{ url: 'https://untrusted-cdn.test/sample.mp4', backup_url: ['https://cdn.bilivideo.com/sample.mp4'], size: 16 }] } });
-      assert.equal(new URL(url).hostname, 'cdn.bilivideo.com');
-      assert.equal(limits.maxBytes, 32 * 1024 * 1024); return new Response(fakeVideo);
-    } });
-  await provider.call('bilibili_frames', { source: { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, input: { timestamps: '3' } });
-  assert.ok(Buffer.isBuffer(received.bytes)); assert.deepEqual(received.input, { timestamps: '3' });
-});
-
-test('long Bilibili videos choose the smallest H.264 video-only track and skip PCDN ports', async () => {
-  let download = 0; let decoded = 0;
-  const provider = new BridgeMediaProvider({ engine: { frames: async bytes => { assert.equal(bytes.toString(), 'video-only'); decoded++; return { content: [{ type: 'text', text: JSON.stringify({ hasAudio: false }) }] }; } },
-    fetchImpl: async (url, _options, limits) => {
-      if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 42, duration: 1494 } });
-      if (url.includes('fnval=1&')) return Response.json({ code: 0, data: { durl: [{ url: 'https://cdn.bilivideo.com/muxed', size: 97320214 }] } });
-      if (url.includes('fnval=16&')) return Response.json({ code: 0, data: { dash: { video: [
-        { codecid: 12, bandwidth: 100000, baseUrl: 'https://cdn.bilivideo.com/hevc' },
-        { codecid: 7, bandwidth: 700000, baseUrl: 'https://cdn.bilivideo.com/large' },
-        { codecid: 7, bandwidth: 450231, baseUrl: 'https://mcdn.bilivideo.cn:8082/video', backupUrl: ['https://cdn.bilivideo.com/small'] },
-      ] } } });
-      assert.equal(url, 'https://cdn.bilivideo.com/small'); assert.equal(limits.maxBytes, MAX_BILIBILI_VIDEO_BYTES);
-      download++; return new Response('video-only');
-    }
-  });
-  const result = await provider.frames({ type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, { maxFrames: 3 });
-  const metadata = JSON.parse(result.content[0].text);
-  assert.equal(metadata.hasAudio, undefined); assert.equal(metadata.audio.status, 'not_requested');
-  assert.equal(metadata.audio.nextService, 'bilibili.transcript'); assert.match(metadata.note, /不代表原视频静音/);
-  assert.equal(download, 1); assert.equal(decoded, 1);
-});
-
-test('oversized Bilibili tracks return a typed limit before downloading and never expose raw error text', async () => {
-  const provider = new BridgeMediaProvider({ fetchImpl: async url => {
-    if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 42, duration: 1494 } });
-    if (url.includes('fnval=1&')) return Response.json({ code: 0, data: { durl: [{ url: 'https://cdn.bilivideo.com/muxed', size: 200000000 }] } });
-    if (url.includes('fnval=16&')) return Response.json({ code: 0, data: { dash: { video: [{ codecid: 7, bandwidth: 1000000 }] } } });
-    assert.fail('Oversized tracks must not be downloaded');
-  } });
-  await assert.rejects(provider.frames({ type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }), error => {
-    assert.equal(error.code, 'MEDIA_DOWNLOAD_LIMIT'); assert.equal(mediaFailure(error).limitMiB, 96); return true;
-  });
-  assert.ok(!JSON.stringify(mediaFailure(Error('private signed URL or credential'))).includes('private'));
-  const permissions = new ExtensionPermissions({ policy: { rules: [{ key: 'group:456', capability: 'video.test', decision: 'allow', dataScopes: ['source-reference'] }] } });
-  const runtime = new ContentServiceRuntime({ permissions, services: [{ id: 'video.test', effect: 'read', accepts: ['link'], transport: { type: 'http', url: 'http://127.0.0.1:9871/test' } }],
-    fetchImpl: async () => Response.json({ isError: true, content: [{ type: 'text', text: JSON.stringify({ protocol: 'qq-bridge.media-error/v1', code: 'MEDIA_DOWNLOAD_LIMIT', limitMiB: 96, message: 'private signed URL' }) }] }) });
-  try { await assert.rejects(runtime.call({ key: 'group:456', scope: 'test', serviceId: 'video.test', source: { type: 'link', sourceId: 'a'.repeat(32), url: 'https://example.com' } }), error => {
-    assert.match(error.message, /MEDIA_DOWNLOAD_LIMIT.*96 MiB/); assert.ok(!error.message.includes('private')); return true;
-  }); } finally { await runtime.close(); }
-});
-
-test('real FFmpeg samples changing MP4 and GIF frames, returns PNGs and cleans private job files', { skip: !installed }, () => fixtures(async ({ engine, directory, video, gif }) => {
-  for (const bytes of [video, gif]) {
-    assert.ok((await engine.frames(bytes)).content.length >= 2, 'default sampling must work without timestamps');
-    const result = await engine.frames(bytes, { maxFrames: 3, timestamps: '0,1,2' });
-    assert.equal(result.content.length, 4);
-    const images = result.content.slice(1).map(block => PNG.sync.read(Buffer.from(block.data, 'base64')));
-    assert.ok(images[0].data[0] > images[0].data[1]);
-    assert.ok(images[1].data[1] > images[1].data[0]);
-    assert.ok(images[2].data[2] > images[2].data[1]);
-    assert.match(result.content[0].text, /不能据此声称/);
-    assert.deepEqual(result.evidence, ['metadata', 'frames']);
-  }
-  assert.ok(!(await fs.readdir(directory)).some(name => name.startsWith('qq-media-')));
-  assert.equal((await engine.frames(gif, { timestamps: '2.9' })).content.length, 2);
-  await assert.rejects(engine.frames(video, { timestamps: '1000' }), /范围/);
-}));
-
-test('real local SenseVoice can process a bounded video/audio track with no API account', { skip: !installed }, () => fixtures(async ({ engine, wav }) => {
-  const result = await engine.transcript(wav, { durationSeconds: 1 });
-  assert.deepEqual(result.evidence, ['metadata', 'transcript', 'audio']);
-  const value = JSON.parse(result.content[0].text);
-  assert.equal(value.startSeconds, 0); assert.equal(value.endSeconds, 1); assert.equal(typeof value.text, 'string');
-}));
-
-test('scene sampling detects real cuts, reports absolute timestamps and supports focused follow-up', { skip: !installed }, () => fixtures(async ({ engine, video }) => {
-  const result = await engine.frames(video, { sampling: 'scene', maxFrames: 3, startSeconds: 0, durationSeconds: 3 });
-  const value = JSON.parse(result.content[0].text);
-  assert.equal(value.sampling, 'scene'); assert.ok(value.sceneTimes.length >= 1, 'real color cuts must be detected');
-  assert.ok(value.sceneTimes.every(time => time >= 0 && time < 3));
-  assert.equal(value.nextInput, null); assert.equal(value.coverage.sampledOnly, true);
-  const focused = JSON.parse((await engine.frames(video, { sampling: 'scene', startSeconds: 1, durationSeconds: 1, maxFrames: 2 })).content[0].text);
-  assert.ok(focused.sampledTimes.every(time => time >= 1 && time < 2));
-  assert.equal(focused.nextInput.startSeconds, 2);
-  await assert.rejects(engine.frames(video, { sampling: 'scene', durationSeconds: 181 }), /时间范围/);
-  await assert.rejects(engine.frames(video, { startSeconds: 1, durationSeconds: 1, timestamps: '0' }), /范围/);
-}));
-
-test('segmented transcription keeps successful evidence on failure and resumes at the missing segment', { skip: !installed }, () => fixtures(async ({ engine, wav }) => {
-  engine.probe = async () => ({ duration: 22, hasAudio: true });
+test('B站 download hands local bytes and site subtitles to the new engine; no legacy extractor or URL reaches decoder', async () => {
   const calls = [];
-  engine.recognizeSegment = async (_file, _directory, start, end) => {
-    calls.push([start, end]); if (start === 12) throw Error('private decoder details');
-    return { start, end, text: `片段${start}` };
-  };
-  const result = await engine.transcript(wav, { startSeconds: 2, durationSeconds: 15, segmentSeconds: 5 });
-  const value = JSON.parse(result.content[0].text);
-  assert.deepEqual(calls, [[2, 7], [7, 12], [12, 17]]);
-  assert.equal(value.status, 'partial'); assert.equal(value.endSeconds, 12);
-  assert.equal(value.nextInput.startSeconds, 12); assert.equal(value.segments.length, 2);
-  assert.equal(result.cacheable, false); assert.ok(!JSON.stringify(result).includes('private'));
-  await assert.rejects(engine.transcript(wav, { segmentSeconds: 1 }), /segmentSeconds/);
-}));
-
-test('real ASR splits an audio window into timestamped segments and clips the final segment', { skip: !installed }, () => fixtures(async ({ engine, wav }) => {
-  const long = Buffer.concat([wav.subarray(0, 44), Buffer.alloc(16000 * 2 * 12)]);
-  long.writeUInt32LE(long.length - 8, 4); long.writeUInt32LE(long.length - 44, 40);
-  const value = JSON.parse((await engine.transcript(long, { startSeconds: 1, durationSeconds: 15, segmentSeconds: 5 })).content[0].text);
-  assert.deepEqual(value.segments.map(s => [s.start, s.end]), [[1, 6], [6, 11], [11, 12]]);
-  assert.equal(value.endSeconds, 12); assert.equal(value.nextInput, null);
-}));
-
-test('Bilibili subtitles honor focused windows and partial ASR results preserve continuation', async () => {
-  const source = { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' };
-  const provider = new BridgeMediaProvider({ extractAll: async () => ({ success: true, metadata: { duration: 300 },
-    transcript: { source: 'subtitle', text: '全部字幕', segments: [{ start: 0, end: 20, text: '前面' }, { start: 100, end: 110, text: '目标片段' }, { start: 200, end: 220, text: '后面' }] } }) });
-  const value = JSON.parse((await provider.call('bilibili_transcript', { source, input: { startSeconds: 100, durationSeconds: 20 } })).content[0].text);
-  assert.equal(value.transcript.text, '目标片段'); assert.equal(value.nextInput.startSeconds, 120);
-  provider.localTranscript = async () => ({ source: 'sensevoice-local', text: '部分识别', segments: [{ start: 50, end: 60, text: '部分识别' }],
-    status: 'partial', coverage: { startSeconds: 50, endSeconds: 60, totalDuration: 300, partial: true }, nextInput: { startSeconds: 60, durationSeconds: 20 } });
-  const result = await provider.call('bilibili_transcript', { source, input: { startSeconds: 50, durationSeconds: 20 } });
-  assert.equal(JSON.parse(result.content[0].text).audio.status, 'partial');
-  assert.equal(result.cacheable, false); assert.ok(result.evidence.includes('audio'));
+  const provider = new BridgeMediaProvider({ sessdata: 'fixture-cookie', engine: { storyboard: async (bytes, input, extra) => {
+    assert.equal(bytes.toString(), 'video'); assert.equal(input.startSeconds, 12); assert.equal(extra.transcriptSegments[0].text, '字幕原文');
+    return { content: [{ type: 'text', text: '{}' }], evidence: ['frames', 'transcript'] };
+  } }, fetchImpl: async (url, options, limits) => {
+    calls.push(url);
+    if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 42, duration: 60, title: '片名' } });
+    if (url.includes('/playurl?')) return Response.json({ code: 0, data: { dash: { video: [{ codecid: 7, bandwidth: 1000, baseUrl: 'https://cdn.bilivideo.com/video' }] } } });
+    if (url.includes('/player/v2?')) return Response.json({ code: 0, data: { subtitle: { subtitles: [{ lan: 'zh-CN', subtitle_url: 'https://aisubtitle.hdslb.com/sub.json' }] } } });
+    assert.equal(options?.headers?.cookie, undefined);
+    if (url.includes('sub.json')) return Response.json({ body: [{ from: 12, to: 14, content: '字幕原文' }] });
+    assert.equal(limits.maxBytes, 96 * 1048576); return new Response('video');
+  } });
+  const result = await provider.call('bilibili_storyboard', { source: { type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }, input: { startSeconds: 12 } });
+  assert.equal(JSON.parse(result.content[0].text).title, '片名'); assert.equal(calls.length, 5);
 });
 
-test('services remain default-deny, and approval is checked before reading source bytes', async () => {
-  let reads = 0;
-  const permissions = new ExtensionPermissions();
-  const runtime = new ContentServiceRuntime({ services: buildMediaServices(), permissions, readSource: async () => { reads++; throw Error('should not read'); } });
+test('B站 oversized streams fail before downloading and never expose signed URLs', async () => {
+  let downloads = 0;
+  const provider = new BridgeMediaProvider({ fetchImpl: async url => {
+    if (url.includes('/view?')) return Response.json({ code: 0, data: { cid: 42, duration: 1200 } });
+    if (url.includes('/playurl?')) return Response.json({ code: 0, data: { dash: { video: [{ codecid: 7, bandwidth: 9000000, baseUrl: 'https://cdn.bilivideo.com/secret' }] } } });
+    downloads++; throw Error('must not download');
+  } });
+  await assert.rejects(provider.storyboard({ type: 'link', url: 'https://www.bilibili.com/video/BV1xx411c7mD' }), e => e.code === 'MEDIA_DOWNLOAD_LIMIT');
+  assert.equal(downloads, 0);
+});
+
+test('permissions remain default deny; ask is checked before source bytes are read', async () => {
+  let reads = 0; const permissions = new ExtensionPermissions();
+  const runtime = new ContentServiceRuntime({ services: buildMediaServices(), permissions, readSource: async () => { reads++; throw Error('unexpected'); } });
   const source = { type: 'video', sourceId: 'a'.repeat(32) };
   try {
     assert.deepEqual(runtime.list(source, { key: 'group:456' }), []);
-    await assert.rejects(runtime.call({ key: 'group:456', scope: 'test', serviceId: 'media.frames', source }), /未获/);
-    permissions.replacePolicy({ rules: [{ key: 'group:456', capability: 'media.frames', decision: 'ask', dataScopes: ['source-bytes'] }] });
-    assert.equal((await runtime.call({ key: 'group:456', scope: 'test', serviceId: 'media.frames', source })).status, 'approval_required');
+    await assert.rejects(runtime.call({ key: 'group:456', scope: 'test', serviceId: 'media.storyboard', source }), /未获/);
+    permissions.replacePolicy({ rules: [{ key: 'group:456', capability: 'media.storyboard', decision: 'ask', dataScopes: ['source-bytes'] }] });
+    assert.equal((await runtime.call({ key: 'group:456', scope: 'test', serviceId: 'media.storyboard', source })).status, 'approval_required');
     assert.equal(reads, 0);
   } finally { await runtime.close(); }
 });
 
-test('actual framework API invokes real stdio/FFmpeg/SenseVoice for scoped frames and gateway voice bytes', { skip: !installed }, () => fixtures(async ({ gif, wav, directory }) => {
+test('real upstream storyboard scans scenes, aligns subtitle times, emits numbered PNG, zooms and cleans caches', () => fixture(async ({ engine, video, gif, directory }) => {
+  const result = await engine.storyboard(video, { asr: false, cells: 3, durationSeconds: 4 }, { transcriptSegments: [{ start: 0, end: 2, text: '红色场景' }, { start: 2, end: 4, text: '绿色场景' }] });
+  const value = JSON.parse(result.content[0].text);
+  assert.equal(value.engine, 'dsh-video-storyboard'); assert.ok(value.cuts >= 1); assert.equal(value.coverage.endSeconds, 4);
+  assert.equal(value.nextInput.startSeconds, 4); assert.ok(value.sheets[0].cells.some(c => c.text?.includes('红色')));
+  assert.ok(value.sheets[0].cells.every(c => c.i > 0 && c.t_end > c.t_start));
+  const image = PNG.sync.read(Buffer.from(result.content[1].data, 'base64')); assert.ok(image.width > 100 && image.height > 100);
+  assert.ok(!JSON.stringify(result).includes(directory)); assert.ok(value.audio.envelope);
+  const zoom = await engine.storyboard(gif, { asr: false, mode: 'zoom', startSeconds: 2, durationSeconds: 2, cells: 2 });
+  const detail = JSON.parse(zoom.content[0].text); assert.equal(detail.coverage.startSeconds, 2);
+  assert.ok(detail.sheets[0].cells.every(c => !c.sub && c.t_start >= 2 && c.t_end <= 4));
+  assert.deepEqual((await fs.readdir(directory)).sort(), ['clip.gif', 'clip.mp4']);
+}));
+
+test('real bridge API and stdio return scoped storyboard image handles; another conversation cannot reuse source', () => fixture(async ({ directory, gif }) => {
   const services = buildMediaServices();
-  const rules = ['media.frames', 'media.transcript'].map(capability => ({ key: 'group:456', capability, decision: 'allow', dataScopes: ['source-bytes', 'input'], maxInputChars: 8000 }));
-  const h = await bridgeHarness({ config: { ownerQQ: 123, dualMode: { enabled: true, ownerPreset: 'standard' },
-    allow: { groups: ['456', '789'], private: ['123'] }, framework: { services, permissions: { rules }, mediaRoots: [directory] } } });
+  const rules = [{ key: 'group:456', capability: 'media.storyboard', decision: 'allow', dataScopes: ['source-bytes', 'input'] }];
+  const h = await bridgeHarness({ config: { ownerQQ: 123, dualMode: { enabled: true, ownerPreset: 'standard' }, allow: { groups: ['456', '789'], private: ['123'] },
+    framework: { services, permissions: { rules }, mediaRoots: [directory] } } });
   const local = path.join(directory, 'received.gif'); await fs.writeFile(local, gif);
   await h.ensureSession('group:456'); await h.ensureSession('group:789');
   h.contentSources.register('group:456', { sources: [{ type: 'sticker', sourceId: 'a'.repeat(32), messageId: '42', file: local }] });
-  h.contentSources.register('group:456', { sources: [{ type: 'voice', sourceId: 'b'.repeat(32), messageId: '43', file: 'received.amr', url: 'https://never-download.invalid/silk' }] });
-  h.bot.raw = async (action, args) => {
-    assert.equal(action, 'get_record'); assert.equal(args.out_format, 'wav');
-    return { base64: wav.toString('base64'), file: '/container-only/audio.wav' };
-  };
   const server = h.startConsoleServer(); if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   const a = new QQBridgeClient({ baseUrl, key: 'group:456', token: h.getSocialV2State('group:456').agentToken });
   const b = new QQBridgeClient({ baseUrl, key: 'group:789', token: h.getSocialV2State('group:789').agentToken });
   try {
-    const result = await a.processContent('media.frames', { sourceId: 'a'.repeat(32), input: { timestamps: '0,1,2', maxFrames: 3 } });
-    assert.equal(result.content.filter(block => block.type === 'image').length, 3);
-    assert.equal(result.media.length, 3); assert.deepEqual(result.evidence, ['metadata', 'frames']);
-    assert.ok(result.media.every(media => /^[a-f0-9]{32}$/.test(media.mediaId)));
-    const scene = await a.processContent('media.frames', { sourceId: 'a'.repeat(32), input: { sampling: 'scene', startSeconds: 1, durationSeconds: 1, maxFrames: 2 } });
-    const sceneMetadata = JSON.parse(scene.content[0].text);
-    assert.equal(sceneMetadata.sampling, 'scene'); assert.equal(sceneMetadata.coverage.startSeconds, 1);
-    assert.equal(sceneMetadata.nextInput.startSeconds, 2);
-    await assert.rejects(b.processContent('media.frames', { sourceId: 'a'.repeat(32) }), /会话|引用/);
-    assert.ok(!JSON.stringify(result).includes('private-job'));
-    const voice = await a.processContent('media.transcript', { sourceId: 'b'.repeat(32), input: { durationSeconds: 1 } });
-    assert.deepEqual(voice.evidence, ['metadata', 'transcript', 'audio']);
-    assert.equal(JSON.parse(voice.content[0].text).endSeconds, 1);
-    await assert.rejects(b.processContent('media.transcript', { sourceId: 'b'.repeat(32) }), /会话|引用/);
+    const result = await a.processContent('media.storyboard', { sourceId: 'a'.repeat(32), input: { asr: false, cells: 3, durationSeconds: 4 } });
+    assert.equal(result.content.filter(c => c.type === 'image').length, 1); assert.equal(result.media.length, 1);
+    assert.match(result.media[0].mediaId, /^[a-f0-9]{32}$/); assert.deepEqual(result.evidence, ['metadata', 'frames']);
+    await assert.rejects(b.processContent('media.storyboard', { sourceId: 'a'.repeat(32) }), /会话|引用/);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await h.close(); }
 }));
+
+test('standalone QQ voice keeps real local SenseVoice; storyboard marks failed ASR without claiming silence', () => fixture(async ({ engine, wav, video }) => {
+  const voice = await engine.transcript(wav, { durationSeconds: 1 });
+  assert.equal(JSON.parse(voice.content[0].text).endSeconds, 1); assert.ok(voice.evidence.includes('audio'));
+  engine.transcript = async () => { throw Error('unavailable'); };
+  const result = await engine.storyboard(video, { durationSeconds: 2, cells: 1 });
+  const value = JSON.parse(result.content[0].text); assert.equal(value.audio.status, 'failed'); assert.equal(result.cacheable, false);
+  assert.ok(!result.evidence.includes('audio')); assert.match(value.audio.note, /不能/);
+}));
+
+test('native subprocesses stop on timeout and oversized output', async () => {
+  await assert.rejects(runMedia(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { timeoutMs: 80 }), /超时|取消/);
+  await assert.rejects(runMedia(process.execPath, ['-e', "process.stdout.write('x'.repeat(10000))"], { maxOutput: 100 }), /超时|取消/);
+});

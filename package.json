@@ -86,8 +86,12 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@snowluma/mcp": "^1.14.20",
     "@snowluma/sdk": "^1.14.20",
+    "dsh-video-storyboard": "0.5.4",
     "js-yaml": "^4.3.2",
     "pngjs": "7.0.0",
     "zod": "^4.4.3"
+  },
+  "optionalDependencies": {
+    "@ffmpeg-installer/win32-x64": "4.1.0"
   }
 }

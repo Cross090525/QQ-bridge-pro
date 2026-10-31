@@ -4,7 +4,7 @@
 
 Connect QQ groups and private conversations to DeepSeek Harness (DSH). Agents retrieve relevant context, select content and memory services when needed, and reply through QQ.
 
-**This repository extends [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) and combines work from DSH, SnowLuma, dsh-bilibili, Haitang and their communities.** The upstream bridge supplies the messaging connection, modes, tool restrictions and console. This fork adds scoped APIs, content-service integration, external memory routing, extension approvals and timeline-based evidence. Underlying modules and models remain the work of their respective projects; see the acknowledgements below.
+**This repository extends [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) and combines work from DSH, SnowLuma, dsh-video-storyboard, Haitang and their communities.** The upstream bridge supplies the messaging connection, modes, tool restrictions and console. This fork adds scoped APIs, content-service integration, external memory routing, extension approvals and timeline-based evidence. Underlying modules and models remain the work of their respective projects; see the acknowledgements below.
 
 ## Implemented capabilities
 
@@ -14,7 +14,7 @@ Connect QQ groups and private conversations to DeepSeek Harness (DSH). Agents re
 | On-demand context | Social v2 requests relevant history, slang, persona and memory instead of attaching them to every wake |
 | Extension interfaces | Conversation-scoped API v1, dependency-free `QQBridgeClient`, external MCP/skill-runner examples |
 | Content services | Typed content with `sourceId`; agent-selected calls to fixed registered MCP/HTTP providers |
-| Video and animation | Bilibili subtitles, segmented ASR, uniform/scene frames, absolute timestamps and continuation inputs; received video and GIF/WebP |
+| Video and animation | dsh-video-storyboard numbered grids, timestamps, subtitles/local ASR, continuation and zoom for Bilibili and received video/GIF/WebP |
 | Speech recognition | Gateway WAV conversion and local SenseVoice recognition, without a new cloud ASR account |
 | Output | Text, links, images, stickers and voice handles; **no speech-generation/TTS provider is integrated** |
 | External memory | Replaceable HTTP/MCP providers, Haitang adapter and conversation namespaces; no old built-in fallback |
@@ -75,9 +75,9 @@ const client = new QQBridgeClient({
   timeoutMs: 190000,
 });
 await client.contentServices(sourceId);
-await client.processContent('bilibili.frames', {
+await client.processContent('bilibili.storyboard', {
   sourceId,
-  input: { sampling: 'scene', startSeconds: 120, durationSeconds: 30, maxFrames: 4 },
+  input: { startSeconds: 120, durationSeconds: 30, cells: 4, need: 'scene' },
 });
 ```
 
@@ -233,7 +233,8 @@ This framework combines substantial work from multiple projects. Their authors a
 | [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) and contributors | Direct upstream foundation: messaging, modes, guarded presets, console, personas, slang and stickers. Original attribution and copyright are retained |
 | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | Agent runtime, model sessions, tools, presets and event streams |
 | [SnowLuma](https://github.com/SnowLuma/SnowLuma) and OneBot ecosystem | QQ gateway, transports, media and send operations |
-| [CZX2244/dsh-bilibili](https://github.com/CZX2244/dsh-bilibili) | Standalone extraction module reused for Bilibili metadata and subtitles |
+| [SAOS-3624/dsh-video-storyboard](https://github.com/SAOS-3624/dsh-video-storyboard) | Current scene-aware numbered storyboards, sharp frame selection and timelines (Apache-2.0) |
+| [CZX2244/dsh-bilibili](https://github.com/CZX2244/dsh-bilibili) | Historical extraction integration; no longer loaded at runtime |
 | [haitang1/dsh-memory](https://github.com/haitang1/dsh-memory) | `lib/store.js` local storage and lexical/fuzzy retrieval; adapted to isolated bridge namespaces without host auto-injection hooks |
 | [FFmpeg](https://ffmpeg.org/) / ffprobe | Probing, decoding, frame extraction and audio conversion |
 | [SenseVoice](https://github.com/FunAudioLLM/SenseVoice), [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), [ONNX Runtime](https://onnxruntime.ai/) | Speech model, inference interfaces and runtime |

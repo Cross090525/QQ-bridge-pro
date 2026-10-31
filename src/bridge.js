@@ -10377,7 +10377,7 @@ async function main() {
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const videoHint = st.unread.some(message => message.content?.some(item => item.platform === 'bilibili'))
-      ? '【待处理B站分享】先读未读消息取得该链接的 sourceId，调用 qq_content_services，再用 qq_process_content 调用 bilibili.transcript；需要画面再调用 bilibili.frames。web_fetch 只读网页，不代表打开了视频；未尝试获准内容服务前不要断言视频打不开。\n\n' : '';
+      ? '【待处理B站分享】先读未读消息取得该链接的 sourceId，调用 qq_content_services，再用 qq_process_content 调用 bilibili.storyboard 取得分镜图、台词和时间码；精查用mode=zoom及明确时间段。web_fetch 只读网页，不代表打开了视频；未尝试获准内容服务前不要断言视频打不开。\n\n' : '';
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n${videoHint}`;
     if (cfg.socialV2?.context?.strategy !== 'inline') {
       const roleVersion = crypto.createHash('sha256').update(currentRoleHintV2()).digest('hex').slice(0, 16);

@@ -74,14 +74,14 @@ server.tool(
 
 server.tool(
   'web_fetch',
-  '只读抓取 HTTP(S) 网页正文，返回纯文本/HTML 前 50000 字符。B站视频/b23短链须用 qq_content_services 发现 bilibili.transcript / bilibili.frames，再调用 qq_process_content；本工具不读取视频内容。禁止访问内网/本机地址。',
+  '只读抓取 HTTP(S) 网页正文，返回纯文本/HTML 前 50000 字符。B站视频/b23短链须用 qq_content_services 发现 bilibili.storyboard，再调用 qq_process_content；本工具不读取视频内容。禁止访问内网/本机地址。',
   { url: z.string().describe('要抓取的 http(s) URL') },
   async ({ url }) => {
     try {
       const target = new URL(url);
       if (target.hostname === 'b23.tv' || target.hostname.endsWith('.b23.tv')
           || (target.hostname === 'bilibili.com' || target.hostname.endsWith('.bilibili.com')) && target.pathname.startsWith('/video/')) {
-        return { isError: true, content: [{ type: 'text', text: '这是B站视频链接，网页HTML不能作为视频内容。请用消息 content 中的 sourceId 调用 qq_content_services，再通过 qq_process_content 调用 bilibili.transcript；需要画面再用 bilibili.frames。服务未配置或未授权时如实说明，不改用网页抓取绕过授权，不凭标题评价视频。' }] };
+        return { isError: true, content: [{ type: 'text', text: '这是B站视频链接，网页HTML不能作为视频内容。请用消息 content 中的 sourceId 调用 qq_content_services，再通过 qq_process_content 调用 bilibili.storyboard 取得分镜图、台词和时间码；精查用mode=zoom。服务未配置或未授权时如实说明，不改用网页抓取绕过授权，不凭标题评价视频。' }] };
       }
       const result = await safeFetch(url);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };

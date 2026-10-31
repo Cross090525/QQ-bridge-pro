@@ -77,7 +77,7 @@ test('Bilibili video fetch guides the Agent to scoped content services without d
     const result = await callTool('web_fetch', { url });
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /qq_content_services/);
-    assert.match(result.content[0].text, /bilibili.transcript/);
+    assert.match(result.content[0].text, /bilibili.storyboard/);
     assert.match(result.content[0].text, /sourceId/);
   }
 });
