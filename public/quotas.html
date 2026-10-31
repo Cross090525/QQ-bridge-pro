@@ -36,7 +36,7 @@ async function load(){if(loading)return;loading=true;try{
   if(!data.buckets.length)container.append(el('p','尚无计数。'));
   for(const b of data.buckets.slice().sort((a,b)=>Number(b.blocked)-Number(a.blocked))){
     const article=el('article','');article.append(el('h2',labels[b.resource]||b.resource),el('p',`${b.key==='*'?'全局共用':b.key} · ${b.used}/${b.limit} 次 · ${b.windowMs/60000}分钟 · ${b.blocked?'额度暂满':'可用'}`),el('small',`${b.builtin?'继承现有次数限制':'自定义规则 '+b.ruleId} · 窗口开始 ${new Date(b.windowStart).toLocaleString()} · 恢复时间 ${new Date(b.resetsAt).toLocaleString()} · 剩余 ${Math.ceil(b.remainingMs/60000)} 分钟`));
-    if(b.blocked){article.append(el('p',`申请 ${b.requestId} · ${b.decision==='denied'?'已拒绝提前重置':'待审核提前重置'}。到期自动恢复；批准仅提前重置此项额度，其他额度仍独立生效。`));
+    if(b.blocked){article.append(el('p',`申请 ${b.requestId} · ${b.decision==='denied'?'已拒绝提前重置':b.notifiedAt==null?'额度已用完，尚无后续任务被阻塞；可按需提前重置':'待审核提前重置'}。到期自动恢复；批准仅提前重置此项额度，其他额度仍独立生效。`));
       if(b.decision==='pending')for(const[decision,label]of [['approve','批准一次提前重置'],['deny','拒绝提前重置']]){const button=el('button',label);button.onclick=run(async()=>{button.disabled=true;try{await api('/api/quotas/review',{requestId:b.requestId,decision});}finally{await load();}});article.append(button);}
       if(b.decision==='denied'){const button=el('button','重新提交重置申请');button.onclick=run(async()=>{await api('/api/quotas/request',{bucketId:b.id});await load();});article.append(button);}
     }container.append(article);

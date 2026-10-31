@@ -38,7 +38,7 @@ export class UsageQuotas {
         || (b.resetRevision !== undefined && (!Number.isSafeInteger(b.resetRevision) || b.resetRevision < 0))
         || (b.used >= b.limit && (!/^[a-f0-9]{32}$/.test(b.requestId ?? '') || !['pending', 'denied'].includes(b.decision)))))) throw frameworkError('用量状态损坏，拒绝自动清零；请恢复备份', 503);
     this.state = structuredClone(state ?? { version: 1, buckets: [] }); this.revision = 0;
-    for (const b of this.state.buckets) b.blocked = b.used >= b.limit;
+    for (const b of this.state.buckets) { b.blocked = b.used >= b.limit; if (b.decision === 'pending' && b.notifiedAt === undefined) b.notifiedAt = b.requestedAt; }
     this.schedule();
   }
   get enabled() { return this.config.enabled; }
@@ -57,7 +57,7 @@ export class UsageQuotas {
       const wasBlocked = b.blocked; b.limit = r.limit;
       if (this.now() >= b.windowStart + b.windowMs) { b.used = 0; b.windowStart = this.now(); b.cycle++; }
       b.blocked = b.used >= b.limit;
-      if (b.blocked && !wasBlocked) { b.requestId = randomBytes(16).toString('hex'); b.requestedAt = this.now(); b.decision = 'pending'; notifications.push(b); }
+      if (b.blocked && !wasBlocked) { b.requestId = randomBytes(16).toString('hex'); b.requestedAt = this.now(); b.decision = 'pending'; b.notifiedAt = null; }
       else if (!b.blocked && wasBlocked) b.decision = 'cancelled';
     }
     this.config = updated;
@@ -142,14 +142,17 @@ export class UsageQuotas {
       b.limit = rule.limit;
       if (now >= b.windowStart + b.windowMs) { b.used = 0; b.windowStart = now; b.cycle++; }
       b.blocked = b.used >= b.limit;
-      if (b.blocked) throw this.denied(b);
+      if (b.blocked) {
+        if (b.decision === 'pending' && b.notifiedAt == null) { b.notifiedAt = now; this.commit(next); this.dispatch(b); }
+        throw this.denied(b);
+      }
       if (b.used + count > b.limit) {
         throw this.denied(b);
       }
     }
     for (const rule of rules) {
       const b = next.buckets.find(b => b.id === rule.id); b.used += count;
-      if (b.used >= b.limit) { b.blocked = true; b.requestId = randomBytes(16).toString('hex'); b.requestedAt = now; b.decision = 'pending'; notifications.push(b); }
+      if (b.used >= b.limit) { b.blocked = true; b.requestId = randomBytes(16).toString('hex'); b.requestedAt = now; b.decision = 'pending'; b.notifiedAt = null; }
     }
     this.commit(next);
     for (const b of notifications) this.dispatch(b);
@@ -185,6 +188,6 @@ export class UsageQuotas {
     this.refresh();
     const next = structuredClone(this.state), b = next.buckets.find(b => b.id === id);
     if (!b?.blocked || b.decision !== 'denied') throw frameworkError('只有已拒绝且仍暂停的额度可以重新申请', 409);
-    b.requestId = randomBytes(16).toString('hex'); b.requestedAt = this.now(); b.decision = 'pending'; this.commit(next); this.dispatch(b); return structuredClone(b);
+    b.requestId = randomBytes(16).toString('hex'); b.requestedAt = this.now(); b.decision = 'pending'; b.notifiedAt = this.now(); this.commit(next); this.dispatch(b); return structuredClone(b);
   }
 }

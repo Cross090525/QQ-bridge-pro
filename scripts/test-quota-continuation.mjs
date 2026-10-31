@@ -113,3 +113,14 @@ test('a fresh wake excludes expired historical quota-blocked media and prioritiz
   assert.equal(downloaded(), 1); assert.deepEqual(h.calls.images, ['fresh.png']);
   assert.equal(h.workingMemory.get(KEY).media.find(m => m.sourceId === oldSource).status, 'quota_timeout');
 }));
+
+test('three images need only one notification even if the previous window already used one allowance', () => fixture(async ({ h, receive, read }) => {
+  h.usageQuotas.consume(KEY, 'media.image'); await receive(3);
+  const work = read(); await until(() => h.usageQuotas.waiters.size === 1); await pause();
+  const notices = () => h.calls.sent.filter(m => m.kind === 'private' && JSON.stringify(m).includes('用量暂满'));
+  assert.equal(notices().length, 1);
+  h.usageQuotas.resolve(h.usageQuotas.list().find(b => b.blocked).requestId, 'approve');
+  const result = await work; assert.equal(result.images.filter(i => i.data).length, 3);
+  await pause(); assert.equal(notices().length, 1, 'finishing on the last allowance must not ask for another reset');
+  assert.equal(h.usageQuotas.list().find(b => b.resource === 'media.image').used, 2);
+}));

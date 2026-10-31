@@ -20,8 +20,9 @@ const flush = () => new Promise(r => setImmediate(r));
 
 test('last allowed read is reserved; exhaustion notifies once, survives restart within its window and expires automatically', async () => {
   const f = unit(); f.quotas.consume(KEY, 'media.image'); const final = f.quotas.consume(KEY, 'media.image');
-  final.check(); await flush(); assert.equal(f.notifications.length, 1); assert.equal(f.quotas.list()[0].used, 2);
+  final.check(); await flush(); assert.equal(f.notifications.length, 0); assert.equal(f.quotas.list()[0].used, 2);
   for (let n = 0; n < 20; n++) assert.throws(() => f.quotas.consume(KEY, 'media.image'), { code: 'QUOTA_EXHAUSTED' });
+  await flush(); assert.equal(f.notifications.length, 1);
   assert.equal(f.state().buckets[0].blocked, undefined, 'suspension is not a persisted flag');
   const restored = new UsageQuotas({ config: config([rule()]), state: f.state(), now: () => 100000 });
   assert.throws(() => restored.consume(KEY, 'media.image'), { code: 'QUOTA_EXHAUSTED' }); restored.close();
@@ -43,7 +44,7 @@ test('denial prevents early reset; administrator may reapply and deadlines inval
   f.quotas.resolve(b.requestId, 'deny'); assert.throws(() => f.quotas.consume(KEY, 'media.image'), { code: 'QUOTA_EXHAUSTED' });
   assert.throws(() => f.quotas.resolve(b.requestId, 'approve'), /已处理/);
   const next = f.quotas.requestAgain(b.id); assert.notEqual(next.requestId, b.requestId); await flush(); f.quotas.resolve(next.requestId, 'approve');
-  f.quotas.consume(KEY, 'media.image'); await flush(); assert.equal(f.notifications.length, 3);
+  f.quotas.consume(KEY, 'media.image'); await flush(); assert.equal(f.notifications.length, 1);
   const last = f.quotas.list()[0]; f.advance(99999999); assert.equal(f.quotas.list()[0].blocked, false);
   assert.throws(() => f.quotas.resolve(last.requestId, 'approve'), /窗口已结束/);
 });
@@ -52,7 +53,7 @@ test('unexhausted windows renew normally; global, conversation and exact scopes 
   f.quotas.consume(KEY, 'media.image'); f.advance(60001); f.quotas.consume(KEY, 'media.image');
   assert.equal(f.quotas.list().find(b => b.key === KEY).used, 1);
   f.quotas.consume('group:789', 'media.image');
-  const before = f.quotas.list(); assert.throws(() => f.quotas.consume(KEY, 'media.image'), { code: 'QUOTA_EXHAUSTED' }); assert.deepEqual(f.quotas.list(), before);
+  const before = f.quotas.list(); assert.throws(() => f.quotas.consume(KEY, 'media.image'), { code: 'QUOTA_EXHAUSTED' }); assert.deepEqual(f.quotas.list().map(({ notifiedAt, ...b }) => b), before.map(({ notifiedAt, ...b }) => b));
   assert.equal(f.quotas.list().find(b => b.ruleId === 'exact').used, 1);
 });
 test('concurrent attempts cannot overspend, and storage failures do not grant work', async () => {
