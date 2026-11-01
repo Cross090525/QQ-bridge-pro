@@ -1,6 +1,6 @@
 # 语言辅助
 
-角色卡继续决定人格、语气和表达方式。此集成只从 dsh-fish-tone 保留只读草稿检查及静态词典，不安装它的全局插件、风格设置、润色器或独立查梗工具。
+角色卡继续决定人格、语气和表达方式。此集成只从 [MX3a48c5/dsh-fish-tone](https://github.com/MX3a48c5/dsh-fish-tone) 保留只读草稿检查及静态词典，不安装它的全局插件、风格设置、润色器或独立查梗工具。
 
 ## 草稿检查
 
@@ -19,3 +19,7 @@
 运行 `npm run setup:language-support`，然后重启桥接及加载 QQ 预设的 DSH。脚本备份配置，注册 `text.judge`，删除旧的 `text.meme`、`text.tone` 服务及其权限，并将旧 `state/fish-tone.json` 改名存档。视频服务及其他扩展保持现有配置。
 
 没有独立的聊天表达设置文件或控制台面板。旧 `/api/fish-tone` 路由已移除。上游 MIT 许可证与固定修订见 `integrations/vendor/dsh-fish-tone/LICENSE`、`UPSTREAM.md`。
+
+## 来源署名
+
+上游代码固定在修订 `b22b071644379ae8abb2640c412eef9ea2de49ee`；原作者与 MIT 声明完整保留于[LICENSE](../../integrations/vendor/dsh-fish-tone/LICENSE)，裁剪范围及本地适配见[UPSTREAM.md](../../integrations/vendor/dsh-fish-tone/UPSTREAM.md)。本仓库仅提供受权限约束的桥接集成，角色卡和已确认黑话仍是现有架构的一部分。

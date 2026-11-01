@@ -4,7 +4,7 @@
 
 Connect QQ groups and private conversations to DeepSeek Harness (DSH). Agents retrieve relevant context, select content and memory services when needed, and reply through QQ.
 
-**This repository extends [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) and combines work from DSH, SnowLuma, dsh-video-storyboard, Haitang and their communities.** The upstream bridge supplies the messaging connection, modes, tool restrictions and console. This fork adds scoped APIs, content-service integration, external memory routing, extension approvals and timeline-based evidence. Underlying modules and models remain the work of their respective projects; see the acknowledgements below.
+**This repository extends [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) and combines work from DSH, SnowLuma, dsh-video-storyboard, dsh-fish-tone, Haitang and their communities.** The upstream bridge supplies the messaging connection, modes, tool restrictions and console. This fork adds scoped APIs, content-service integration, external memory routing, extension approvals and timeline-based evidence. Underlying modules and models remain the work of their respective projects; see the acknowledgements below.
 
 ## Implemented capabilities
 
@@ -229,6 +229,8 @@ SnowLuma is an independent third-party project and is not affiliated with Tencen
 
 ## Acknowledgements and provenance
 
+Upstream modules are credited to their original authors. Bridge adapters, permission checks and integration changes are maintained here; integration does not imply authorship of the underlying projects. See the [source and license record](docs/LICENSE_PROVENANCE.md) for component boundaries.
+
 This framework combines substantial work from multiple projects. Their authors and communities provide the bridge, agent runtime, QQ connectivity, extraction, retrieval and speech recognition; this repository adapts their interfaces and integrates scoped workflows for QQ.
 
 | Project | Contribution and reuse |
@@ -237,6 +239,7 @@ This framework combines substantial work from multiple projects. Their authors a
 | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | Agent runtime, model sessions, tools, presets and event streams |
 | [SnowLuma](https://github.com/SnowLuma/SnowLuma) and OneBot ecosystem | QQ gateway, transports, media and send operations |
 | [SAOS-3624/dsh-video-storyboard](https://github.com/SAOS-3624/dsh-video-storyboard) | Current scene-aware numbered storyboards, sharp frame selection and timelines (Apache-2.0) |
+| [MX3a48c5/dsh-fish-tone](https://github.com/MX3a48c5/dsh-fish-tone) | Vendored read-only draft checker, marker/frame definitions and static dictionaries (MIT; pinned revision `b22b071`). Global persona injection and tone rewriting are excluded. [Source and adaptations](integrations/vendor/dsh-fish-tone/UPSTREAM.md) · [Original license](integrations/vendor/dsh-fish-tone/LICENSE) |
 | [CZX2244/dsh-bilibili](https://github.com/CZX2244/dsh-bilibili) | Historical extraction integration; no longer loaded at runtime |
 | [haitang1/dsh-memory](https://github.com/haitang1/dsh-memory) | `lib/store.js` local storage and lexical/fuzzy retrieval; adapted to isolated bridge namespaces without host auto-injection hooks |
 | [FFmpeg](https://ffmpeg.org/) / ffprobe | Probing, decoding, frame extraction and audio conversion |

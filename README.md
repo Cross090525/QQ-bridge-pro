@@ -4,7 +4,7 @@
 
 把 QQ 群聊和私聊接入 DeepSeek Harness（DSH），让 Agent 根据任务按需读取上下文、调用内容服务与记忆插件，再通过 QQ 回复。
 
-**本项目基于 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 扩展开发，结合 DSH、SnowLuma、dsh-video-storyboard、Haitang 等项目的成果。** 原版桥接提供了 QQ 与 DSH 的主链路、聊天模式、工具约束和控制台；本仓库在此基础上补充开放接口、统一内容服务、外部记忆路由、扩展审批和按时间继续取证。上游模块与模型的成果归各原项目，具体见下方“致谢与来源”。
+**本项目基于 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 扩展开发，结合 DSH、SnowLuma、dsh-video-storyboard、dsh-fish-tone、Haitang 等项目的成果。** 原版桥接提供了 QQ 与 DSH 的主链路、聊天模式、工具约束和控制台；本仓库在此基础上补充开放接口、统一内容服务、外部记忆路由、扩展审批和按时间继续取证。上游模块与模型的成果归各原项目，具体见下方“致谢与来源”。
 
 ## 当前能力
 
@@ -407,6 +407,8 @@ SnowLuma 是独立第三方项目，与腾讯/QQ 无隶属关系，仅供学习�
 
 ## 致谢与来源
 
+引入模块的成果归原作者。本仓库负责桥接适配、权限控制与集成改动，不将上游模块标为原创；各组件来源和许可边界见[来源记录](docs/LICENSE_PROVENANCE.md)。
+
 本框架结合多个项目的成果。上游作者和社区提供了桥接、Agent运行时、QQ网关、视频提取、记忆检索和语音识别的基础能力；本仓库围绕QQ场景做接口适配、权限与流程整合。
 
 | 项目 / 社区 | 贡献与本仓库使用方式 |
@@ -415,6 +417,7 @@ SnowLuma 是独立第三方项目，与腾讯/QQ 无隶属关系，仅供学习�
 | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | Agent运行时、模型会话、工具调用、预设和事件流；本仓库适配其接口 |
 | [SnowLuma](https://github.com/SnowLuma/SnowLuma) 与 OneBot 生态 | QQ接入、HTTP/WebSocket消息协议、媒体与发送能力；本仓库连接已运行网关 |
 | [SAOS-3624/dsh-video-storyboard](https://github.com/SAOS-3624/dsh-video-storyboard) | 当前视频理解的分镜、镜头检测、清晰帧选择与时间轴实现（Apache-2.0） |
+| [MX3a48c5/dsh-fish-tone](https://github.com/MX3a48c5/dsh-fish-tone) | 复用只读草稿检查、标记/句式定义和静态词典（MIT，固定修订 `b22b071`）；未引入全局人设注入或语气改写。[来源与本地改动](integrations/vendor/dsh-fish-tone/UPSTREAM.md) · [原许可证](integrations/vendor/dsh-fish-tone/LICENSE) |
 | [CZX2244/dsh-bilibili](https://github.com/CZX2244/dsh-bilibili) | 历史视频提取方案的来源；当前运行时已移除该依赖 |
 | [haitang1/dsh-memory](https://github.com/haitang1/dsh-memory) | 复用 `lib/store.js` 的本地存储与词法/模糊检索；本仓库增加统一协议与分会话命名空间，不加载宿主自动注入钩子 |
 | [FFmpeg](https://ffmpeg.org/) / ffprobe | 媒体探测、解码、抽帧与音频格式转换 |
