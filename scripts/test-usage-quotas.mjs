@@ -63,13 +63,15 @@ test('concurrent attempts cannot overspend, and storage failures do not grant wo
   const broken = unit([rule()], { save: () => { throw Error('disk full'); } });
   assert.throws(() => broken.quotas.consume(KEY, 'media.image'), /disk full/); assert.equal(broken.quotas.list().length, 0);
 });
-test('existing minute/hour limits share automatic renewal and optional early reset', () => {
-  const q = new UsageQuotas({ config: { enabled: true, includeExisting: true } });
-  const legacy = [[60000, 1], [3600000, 3]];
-  q.consume(KEY, 'model.wake', { legacy }); assert.throws(() => q.consume(KEY, 'model.wake', { legacy }), { code: 'QUOTA_EXHAUSTED' });
-  const minute = q.list().find(b => b.windowMs === 60000); q.resolve(minute.requestId, 'approve'); q.consume(KEY, 'model.wake', { legacy });
-  assert.equal(q.list().find(b => b.windowMs === 3600000).used, 2);
+test('legacy limits no longer stack on the authoritative quota rules', () => {
+  const q = new UsageQuotas({ config: { enabled: true, includeExisting: true, rules: [rule('model.wake', { limit: 3 })] } });
+  const legacy = [[60000, 1], [3600000, 1]];
+  for (let i = 0; i < 3; i++) q.consume(KEY, 'model.wake', { legacy });
+  assert.equal(q.list().length, 1);
+  assert.throws(() => q.consume(KEY, 'model.wake', { legacy }), { code: 'QUOTA_EXHAUSTED' });
+  q.close();
 });
+
 test('configuration preserves usage counts; malformed state fails closed', () => {
   const f = unit([rule('media.image', { limit: 1 })]); f.quotas.consume(KEY, 'media.image');
   f.quotas.configure(config([rule('media.image', { limit: 1 })])); assert.throws(() => f.quotas.consume(KEY, 'media.image'), { code: 'QUOTA_EXHAUSTED' });

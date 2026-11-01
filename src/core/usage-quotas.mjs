@@ -11,7 +11,7 @@ export function normalizeQuotaConfig(value = {}) {
   const rules = value.rules ?? [];
   if (!Array.isArray(rules) || rules.length > 100) fail('最多配置100条额度');
   const ids = new Set();
-  return { enabled: value.enabled === true, includeExisting: value.includeExisting !== false, rules: rules.map(rule => {
+  return { enabled: value.enabled === true, includeExisting: false, rules: rules.map(rule => {
     if (!rule || Object.keys(rule).some(k => !['id', 'resource', 'scope', 'key', 'limit', 'windowMinutes'].includes(k))
       || !/^[a-z][a-z0-9-]{0,39}$/.test(rule.id ?? '') || ids.has(rule.id) || !resourceOk(rule.resource)
       || !['global', 'conversation', 'exact'].includes(rule.scope) || (rule.scope === 'exact' && !keyOk(rule.key))
@@ -38,6 +38,7 @@ export class UsageQuotas {
         || (b.resetRevision !== undefined && (!Number.isSafeInteger(b.resetRevision) || b.resetRevision < 0))
         || (b.used >= b.limit && (!/^[a-f0-9]{32}$/.test(b.requestId ?? '') || !['pending', 'denied'].includes(b.decision)))))) throw frameworkError('用量状态损坏，拒绝自动清零；请恢复备份', 503);
     this.state = structuredClone(state ?? { version: 1, buckets: [] }); this.revision = 0;
+    this.state.buckets = this.state.buckets.filter(b => !b.builtin);
     for (const b of this.state.buckets) { b.blocked = b.used >= b.limit; if (b.decision === 'pending' && b.notifiedAt === undefined) b.notifiedAt = b.requestedAt; }
     this.schedule();
   }
@@ -117,9 +118,6 @@ export class UsageQuotas {
     const rules = this.config.rules.filter(r => r.resource === resource && (r.scope !== 'exact' || r.key === key)).map(r => ({
       ruleId: r.id, resource, scope: r.scope, key: r.scope === 'global' ? '*' : key, limit: r.limit, windowMs: r.windowMinutes * 60000, builtin: false,
     }));
-    if (this.config.includeExisting) for (const [windowMs, limit] of legacy) if (Number.isSafeInteger(limit) && limit > 0) rules.push({
-      ruleId: `existing:${windowMs}`, resource, scope: 'exact', key, limit, windowMs, builtin: true,
-    });
     return rules.map(r => ({ ...r, id: hash([r.builtin, r.ruleId, r.resource, r.key, r.windowMs]) }));
   }
   denied(b) {
@@ -169,7 +167,7 @@ export class UsageQuotas {
         && this.now() < current.windowStart + current.windowMs) return this.notify(data);
     }).catch(() => {});
   }
-  list() { this.refresh(); return this.state.buckets.map(b => ({ ...structuredClone(b),
+  list() { this.refresh(); return this.state.buckets.filter(b => this.rules(b.key === "*" ? "group:1" : b.key, b.resource).some(r => r.id === b.id)).map(b => ({ ...structuredClone(b),
     used: !b.blocked && this.now() >= b.windowStart + b.windowMs ? 0 : b.used,
     resetsAt: b.windowStart + b.windowMs, remainingMs: Math.max(0, b.windowStart + b.windowMs - this.now()) })); }
   resolve(requestId, decision) {

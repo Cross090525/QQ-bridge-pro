@@ -1474,12 +1474,7 @@ async function main() {
     },
   });
   extensionPermissions.quotas = usageQuotas;
-  function usageLegacy(resource, key) {
-    if (modeFor(key) === 'closed-agent' && resource !== 'send.voice') return [];
-    const c = resource === 'model.wake' ? cfg.socialV2?.wake : resource === 'send.voice' ? voiceCfg() : cfg.socialV2?.send;
-    return [[60000, Number(resource === 'model.wake' ? c?.maxWakePerMinute : resource === 'send.voice' ? c?.maxPerMinute : c?.maxSendPerMinute) || 0],
-      [3600000, Number(resource === 'model.wake' ? c?.maxWakePerHour : resource === 'send.voice' ? c?.maxPerHour : c?.maxSendPerHour) || 0]];
-  }
+  function usageLegacy() { return []; }
   const quotaBudgets = new Map();
   function quotaBudget(key, task = '') {
     const context = requestContext.getStore();
@@ -1811,7 +1806,6 @@ async function main() {
     const sendCfg = cfg.socialV2?.send ?? {};
     if (st) {
       for (const [windowMs, limit] of [[60000, Number(sendCfg.maxSendPerMinute)], [3600000, Number(sendCfg.maxSendPerHour)]]) {
-        if (!usageQuotas.enabled && limit > 0 && st.sendTimes.filter(time => now - time < windowMs).length >= limit) throw frameworkError('发送频率超限', 429);
       }
       st.sendTimes.push(now);
     }
@@ -2118,18 +2112,8 @@ async function main() {
    * 只**检查**不占额度：额度在真正发出去之后才由 voiceBudgetCommit 记账 ——
    * 这样参数错、被审计拦截、网关失败都不会白白吃掉配额（否则连失败几次就被假 429 卡住）。
    */
-  function voiceBudgetCheck(scopeKey, cfgV) {
-    const now = Date.now();
-    if (usageQuotas.enabled) return;
-    const bucket = voiceSendTimes.get(scopeKey) ?? [];
-    const inMinute = bucket.filter((t) => now - t < 60000);
-    const inHour = bucket.filter((t) => now - t < 3600000);
-    if (cfgV.maxPerMinute > 0 && inMinute.length + 1 > cfgV.maxPerMinute) {
-      throw new Error(`语音发送频率超限（每分钟最多 ${cfgV.maxPerMinute} 条），请稍后再试`);
-    }
-    if (cfgV.maxPerHour > 0 && inHour.length + 1 > cfgV.maxPerHour) {
-      throw new Error(`语音发送频率超限（每小时最多 ${cfgV.maxPerHour} 条），请稍后再试`);
-    }
+  function voiceBudgetCheck() {
+    // Frequency budgets are owned exclusively by UsageQuotas.
   }
 
   /** 语音真正发出后记账（顺带裁掉超过 1 小时的旧时间戳，避免数组无界增长）。 */
@@ -2730,7 +2714,6 @@ async function main() {
     const recentMinute = arr.filter((t) => now - t < 60 * 1000).length;
     const MAX_PER_MINUTE = 2;
     const MAX_PER_HOUR = 10;
-    if (!usageQuotas.enabled && (recentMinute >= MAX_PER_MINUTE || arr.length >= MAX_PER_HOUR)) return false;
     await consumeUsage(key, 'slang.submit', [[60000, MAX_PER_MINUTE], [3600000, MAX_PER_HOUR]]);
     arr.push(now);
     slangSubmitTimes.set(key, arr);
@@ -6038,10 +6021,6 @@ async function main() {
             const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
             const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
             const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-            if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + messages.length > maxPerMinute) || (maxPerHour > 0 && recentHour + messages.length > maxPerHour))) {
-              sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
-              return;
-            }
             // 先预占发送额度，避免并发绕过限频
             for (let i = 0; i < messages.length; i++) st.sendTimes.push(now);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
@@ -6170,10 +6149,6 @@ async function main() {
           const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
           const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
           const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-          if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + messages.length > maxPerMinute) || (maxPerHour > 0 && recentHour + messages.length > maxPerHour))) {
-            sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
-            return;
-          }
           // 先预占发送额度，避免并发绕过限频
           for (let i = 0; i < messages.length; i++) st.sendTimes.push(now);
           if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
@@ -6266,10 +6241,6 @@ async function main() {
           const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
           const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
           const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-          if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour))) {
-            sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
-            return;
-          }
           st.sendTimes.push(now);
           if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
           // 成员校验是异步的（要问 OneBot）；期间操作者可能切模式/改白名单/开静默。
@@ -6654,10 +6625,6 @@ async function main() {
             const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
             const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
             const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-            if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour))) {
-              sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
-              return;
-            }
             st.sendTimes.push(now);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             const sent = await sendStickerV2(key, stickerId, {
@@ -6727,10 +6694,6 @@ async function main() {
           const maxPerHour = Math.max(0, Number(collectCfg.maxPerHour) || 0);
           const recentMinute = (st.stickerCollectTimes || []).filter((t) => now - t < 60000).length;
           const recentHour = (st.stickerCollectTimes || []).filter((t) => now - t < 3600000).length;
-          if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour))) {
-            sendJson({ ok: false, error: '收藏表情太频繁了，请过一会儿再偷图' }, 429);
-            return;
-          }
           // 先预占收藏次数，避免并发调用绕过限频；失败时回滚。
           st.stickerCollectTimes = st.stickerCollectTimes || [];
           await consumeUsage(key, 'sticker.collect', [[60000, maxPerMinute], [3600000, maxPerHour]]);
@@ -7211,10 +7174,6 @@ async function main() {
           const fTimes = feedbackTimes.get(key) || [];
           const fRecentMinute = fTimes.filter((t) => fNow - t < 60000).length;
           const fRecentHour = fTimes.filter((t) => fNow - t < 3600000).length;
-          if (!usageQuotas.enabled && (fRecentMinute >= 5 || fRecentHour >= 20)) {
-            sendJson({ ok: false, error: '反馈过于频繁，请稍后再试' }, 429);
-            return;
-          }
           await consumeUsage(key, 'feedback.submit', [[60000, 5], [3600000, 20]]);
           fTimes.push(fNow);
           feedbackTimes.set(key, fTimes.slice(-100));
@@ -7680,10 +7639,6 @@ async function main() {
             const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
             const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
             const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-            if (!usageQuotas.enabled && ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour))) {
-              sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
-              return;
-            }
             st.sendTimes.push(now);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             const sentMessages = await sendMessagesV2(key, [message], [], actualReplyToMessageId, atUserId);
@@ -10880,10 +10835,17 @@ async function main() {
     const st = getSocialV2State(key);
     // 防重入：如果该会话已经有一个 DSH turn 在进行中（AI 正在思考/调用工具），
     // 或已有排队/在途 prompt，则不再投递新的候选唤醒，避免“思维链进行中又塞入一个 question 唤醒”。
-    if (isConversationBusyV2(key, st)) {
+    if (isConversationBusyV2(key, st) || st.wakeQuotaWaiting) {
       if (!Array.isArray(st.pendingWakeReasons)) st.pendingWakeReasons = [];
       const seq = st.lastUnreadSeq || 0;
-      if (!st.pendingWakeReasons.some((r) => r && r.reason === reason && r.seq === seq)) {
+      if (!isTimerWakeReason(reason)) {
+        const priority = { atMention: 4, name: 3, question: 2 };
+        const previous = st.pendingWakeReasons.filter(r => r && !isTimerWakeReason(r.reason));
+        const strongest = previous.reduce((best, r) => (priority[r.reason] || 0) > (priority[best] || 0) ? r.reason : best, reason);
+        st.pendingWakeReasons = st.pendingWakeReasons.filter(r => r && isTimerWakeReason(r.reason));
+        st.pendingWakeReasons.push({ reason: strongest, seq });
+      }
+      if (isTimerWakeReason(reason) && !st.pendingWakeReasons.some((r) => r && r.reason === reason)) {
         st.pendingWakeReasons.push({ reason, seq });
         // 有界队列：最多保留 20 条，防止消息洪峰下无限增长。
         if (st.pendingWakeReasons.length > 20) st.pendingWakeReasons.splice(0, st.pendingWakeReasons.length - 20);
@@ -10902,34 +10864,6 @@ async function main() {
     const maxPerHour = Number(cfg.socialV2?.wake?.maxWakePerHour) || 0;
     const recentMinute = (st.wakeTimes || []).filter((t) => now - t < 60000).length;
     const recentHour = (st.wakeTimes || []).filter((t) => now - t < 3600000).length;
-    if (!usageQuotas.enabled && !bypassRateLimit && ((maxPerMinute > 0 && recentMinute >= maxPerMinute) || (maxPerHour > 0 && recentHour >= maxPerHour))) {
-      let retryAfterMs = 0;
-      if (maxPerMinute > 0 && recentMinute >= maxPerMinute) {
-        const times = (st.wakeTimes || []).filter((t) => now - t < 60000).sort((a, b) => a - b);
-        if (times.length) retryAfterMs = Math.max(retryAfterMs, 60000 - (now - times[0]) + 500);
-      }
-      if (maxPerHour > 0 && recentHour >= maxPerHour) {
-        const times = (st.wakeTimes || []).filter((t) => now - t < 3600000).sort((a, b) => a - b);
-        if (times.length) retryAfterMs = Math.max(retryAfterMs, 3600000 - (now - times[0]) + 500);
-      }
-      // 每次只等一小段（最长 60s）：小时级限频不会一次性睡满一小时而错过中途可用的窗口。
-      const waitMs = Math.min(60000, Math.max(1000, Math.round(retryAfterMs) || 5000));
-      if (!st.rateLimitRetryTimer) {
-        st.rateLimitRetryTimer = setTimeout(() => {
-          st.rateLimitRetryTimer = null;
-          // 消息类原因在重试前再确认一次：等待窗口里消息可能已被别的回合处理掉，
-          // 没必要为一条已经处理过的消息再唤醒一次（定时器类原因与未读无关，不检查）。
-          if (!isTimerWakeReason(reason) && !(Array.isArray(st.unread) && st.unread.length > 0)) {
-            log(`[reserved2] 限频重试前发现未读已清空，跳过 ${key}（${reason}）`);
-            return;
-          }
-          void sendWakePromptV2(key, reason).catch((error) => log(`[reserved2] 限频重试唤醒异常 ${key}:`, error?.message ?? error));
-        }, waitMs);
-        st.rateLimitRetryTimer.unref?.();
-      }
-      log(`[reserved2] 唤醒频率超限，${Math.round(waitMs / 1000)}s 后重试 ${key}（${reason}）`);
-      return;
-    }
     // Only a real new wake resets observation; skipped/busy candidates must
     // preserve the current turn's progress through its required wait window.
     st.preSleepWaitSatisfiedAt = 0;
@@ -10937,10 +10871,11 @@ async function main() {
     st.preSleepWaitAccumMs = 0;
     cancelReplyCheckV2(key); // 本次唤醒已接管，清理仍在排队的回复检查
     const wakeTime = now;
-    try { await consumeUsage(key, 'model.wake', usageLegacy('model.wake', key)); } catch (error) {
+    st.wakeQuotaWaiting = true;
+    try { await consumeUsage(key, 'model.wake'); } catch (error) {
       if (error.code === 'QUOTA_EXHAUSTED') { appendActivity(`${key} observation quota paused`); return; }
       throw error;
-    }
+    } finally { st.wakeQuotaWaiting = false; }
     st.wakeTimes.push(wakeTime);
     if (st.wakeTimes.length > 200) st.wakeTimes = st.wakeTimes.slice(-200);
     // 无论提前唤醒还是超时唤醒，都清理有限潜水定时器与 sleepUntil，避免状态残留/重复唤醒
@@ -11109,10 +11044,17 @@ async function main() {
       }
       return;
     }
-    if (isConversationBusyV2(key, st)) {
+    if (isConversationBusyV2(key, st) || st.wakeQuotaWaiting) {
       if (!Array.isArray(st.pendingWakeReasons)) st.pendingWakeReasons = [];
       const seq = st.lastUnreadSeq || 0;
-      if (!st.pendingWakeReasons.some((r) => r && r.reason === reason && r.seq === seq)) {
+      if (!isTimerWakeReason(reason)) {
+        const priority = { atMention: 4, name: 3, question: 2 };
+        const previous = st.pendingWakeReasons.filter(r => r && !isTimerWakeReason(r.reason));
+        const strongest = previous.reduce((best, r) => (priority[r.reason] || 0) > (priority[best] || 0) ? r.reason : best, reason);
+        st.pendingWakeReasons = st.pendingWakeReasons.filter(r => r && isTimerWakeReason(r.reason));
+        st.pendingWakeReasons.push({ reason: strongest, seq });
+      }
+      if (isTimerWakeReason(reason) && !st.pendingWakeReasons.some((r) => r && r.reason === reason)) {
         st.pendingWakeReasons.push({ reason, seq });
         // 有界队列：最多保留 20 条，防止消息洪峰下无限增长。
         if (st.pendingWakeReasons.length > 20) st.pendingWakeReasons.splice(0, st.pendingWakeReasons.length - 20);
@@ -11151,6 +11093,11 @@ async function main() {
   function replayPendingWakeReasonsV2(key) {
     const st = getSocialV2State(key);
     if (!Array.isArray(st.pendingWakeReasons) || !st.pendingWakeReasons.length) return null;
+    const messages = st.pendingWakeReasons.filter(r => r && !isTimerWakeReason(r.reason));
+    if (messages.length > 1) {
+      const latest = messages.reduce((a, b) => Number(a.seq) >= Number(b.seq) ? a : b);
+      st.pendingWakeReasons = [...st.pendingWakeReasons.filter(r => r && isTimerWakeReason(r.reason)), latest];
+    }
     const item = st.pendingWakeReasons.shift();
     if (!item || typeof item !== 'object') return null;
     if (isTimerWakeReason(item.reason)) {
@@ -11169,7 +11116,7 @@ async function main() {
       }
       return { reason: item.reason, action: 'timer' };
     }
-    const stillRelevant = Array.isArray(st.unread) && st.unread.some((m) => m && Number(m.seq) >= Number(item.seq));
+    const stillRelevant = Array.isArray(st.unread) && st.unread.some((m) => m && Number(m.seq) === Number(item.seq));
     if (stillRelevant) {
       log(`[reserved2] ${key} 补发繁忙期间积压的唤醒：${item.reason}@seq${item.seq}`);
       scheduleWakeV2(key, item.reason);

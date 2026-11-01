@@ -181,9 +181,11 @@ test('service manifest and source changes invalidate pending approvals', () => f
 }, [grant('ask')]));
 
 test('quota also applies to cache hits and rejected calls do not create MCP connections', () => fixture(async ({ h, client, receive }) => {
+  h.usageQuotas.configure({ enabled: true, rules: [{ id: 'extension-limit', resource: 'extension.' + SERVICE.id, scope: 'global', limit: 1, windowMinutes: 1 }] });
+  h.usageQuotas.waitMs = 0;
   const sourceId = await receive();
   await client.processContent(SERVICE.id, { sourceId });
-  await assert.rejects(client.processContent(SERVICE.id, { sourceId }), /额度/);
+  await assert.rejects(client.processContent(SERVICE.id, { sourceId }), /用量/);
   assert.equal(h.extensionPermissions.audit.filter(item => item.event === 'started').length, 1);
 }, [grant('allow', { maxCallsPerMinute: 1 })]));
 

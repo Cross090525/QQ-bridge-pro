@@ -6,6 +6,13 @@
 <meta name="color-scheme" content="light dark">
 <title>QQ 桥接控制台</title>
 <script>
+document.addEventListener('DOMContentLoaded', () => {
+  for (const id of ['v2MaxWakeMin','v2MaxWakeHour','v2MaxSendMin','v2MaxSendHour','v2StickerCollectPerMin','v2StickerCollectPerHour']) {
+    const input = document.getElementById(id);
+    if (input) { input.hidden = true; const label = input.previousElementSibling; if (label?.tagName === 'LABEL') { label.textContent = '次数额度：在“用量与额度”统一配置'; } }
+  }
+});
+
 // 主题引导：须在样式表之前执行，避免首屏闪一下浅色。
 (function () {
   var theme;
@@ -2069,7 +2076,7 @@ button:active:not(:disabled) {
       </div>
       <div id="voiceList" class="meta" style="margin-top:8px">点「刷新语音库」加载…</div>
       <div class="meta" style="margin-top:6px">
-        上限：时长 <code>maxSeconds</code>、体积 <code>maxBytes</code>、频率 <code>maxPerMinute</code>/<code>maxPerHour</code>（见下方配置区）。
+        上限：时长 <code>maxSeconds</code>、体积 <code>maxBytes</code>、次数额度统一在“用量与额度”配置。
         命令行等价工具：<code>node scripts/send-voice.mjs list-voice</code>（经桥接）或 <code>node voice-cli.mjs</code>（独立工具，在上级 <code>voice-tool/</code> 里直连 SnowLuma）。
       </div>
 
