@@ -5,7 +5,7 @@ export function buildDebateInput(task, events, previousResponses = [], { context
   if (!events.length) throw new Error('没有可分析的消息');
   const messages = selectDebateBatch(events);
   const shared = Object.fromEntries(['messages', 'topics', 'media', 'recentReplies'].filter(k => context[k] !== undefined).map(k => [k, context[k]]));
-  return { quotaFinalizing: task.quotaFinalizing === true, quotaNote: task.quotaFinalizing ? '额度等待已达5分钟，仅根据已有证据给出最后一次回应，明确未取得的信息。' : '', phase: 'analysis', topic: task.topic, targetId: task.targetId, messages, context: shared, debateState, hasMore,
+  return { quotaFinalizing: task.quotaFinalizing === true, quotaNote: task.quotaFinalizing ? '额度等待已达5分钟，仅根据已有证据给出最后一次回应，明确未取得的信息。' : '', phase: 'analysis', topicPolicy: '持续跟踪对象当前发言中的主张和议题变化，初始议题不是硬边界；转题时更新state中的currentTopic，不强行拉回旧题。', topic: task.topic, targetId: task.targetId, messages, context: shared, debateState, hasMore,
     previousResponses: previousResponses.slice(-5).map(item => ({ text: String(item.text ?? '').slice(0, 1000), verdict: item.verdict, status: item.status,
       deliveredText: String(item.deliveredText || '').slice(0, 1500), partial: item.partial === true })) };
 }
@@ -23,7 +23,8 @@ export function parseDebateOutput(text, input) {
     const allowed = new Set([...input.messages.map(m => m.id), ...['claims', 'questions'].flatMap(k => (input.debateState?.[k] || []).flatMap(x => x.evidenceIds))]);
     state = normalizeDebateState(result.state, allowed);
   }
-  return { text: result.text, analysis: result.analysis, verdict: result.verdict, evidenceIds: result.evidenceIds, ...(state ? { state } : {}) };
+  if (result.proposedTopic !== undefined && (typeof result.proposedTopic !== 'string' || !result.proposedTopic.trim() || result.proposedTopic.length > 300)) throw Error('推断议题无效');
+  return { ...(result.proposedTopic ? { proposedTopic: result.proposedTopic.trim() } : {}), text: result.text, analysis: result.analysis, verdict: result.verdict, evidenceIds: result.evidenceIds, ...(state ? { state } : {}) };
 }
 
 export class DshDebateAnalyzer {

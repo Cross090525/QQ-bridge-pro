@@ -29,7 +29,7 @@ export class DebateTasks {
     return task;
   }
   view(task) {
-    return { id: task.id, key: task.key, targetId: task.targetId, topic: task.topic, keywords: task.keywords,
+    return { id: task.id, key: task.key, targetId: task.targetId, topic: task.debateState.currentTopic || task.topic, initialTopic: task.topic, keywords: task.keywords,
       status: task.expiresAt <= this.now() && task.status !== 'stopped' ? 'expired' : task.status,
       createdAt: task.createdAt, expiresAt: task.expiresAt, revision: task.revision,
       lastEventId: task.nextEvent, oldestEventId: task.events[0]?.id ?? null,

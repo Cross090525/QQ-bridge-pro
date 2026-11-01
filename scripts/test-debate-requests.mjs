@@ -206,3 +206,30 @@ test('wake config persists and invalidates pending requests; agent/task identiti
   assert.equal((await request('/api/debate/requests/review', { requestId: r.id, decision: 'approve' })).status, 409); assert.equal(records.length, 0);
   assert.equal((await request('/api/debate/wake', { phrases: [] })).status, 400);
 }));
+
+
+test('topic may be omitted with an explicit mention or QQ number', () => {
+  assert.equal(parseDebateWake([text('开个辩论 '), at(234)], config, '999').topic, '');
+  assert.equal(parseDebateWake([text('开个辩论 234')], config, '999').targetId, '234');
+});
+test('custom stop request only revokes its bound task after approval', async () => {
+  const f = fixture();
+  f.requests.configure({ ...config, stopPhrases: ['结束争论'] });
+  const created = f.tasks.create({ key: 'group:456', targetId: '234', topic: '电池', keywords: ['电池'] });
+  const r = receive(f.requests, { segments: [text('结束争论 '), at(234)] }).request;
+  assert.equal(r.action, 'stop'); assert.equal(f.tasks.get(created.task.id).status, 'active');
+  await f.requests.decide(r.id, 'approve');
+  assert.equal(f.tasks.get(created.task.id).status, 'stopped'); assert.equal(f.starts.length, 0);
+});
+
+test('omitted topic is inferred before approval and shown in the pending request', async () => {
+ const h = await bridgeHarness({ config: { ownerQQ: 123, dualMode: { enabled: true }, allow: { groups: ['456'], private: ['123'] }, debate: { groupWake: { enabled: true, phrases: ['启动争论'] } }, socialV2: { proactive: { enabled: false }, sticker: { enabled: false } } }, globals: { DshDebateAnalyzer: class { async analyze() { return { proposedTopic: '电池安全性', verdict: 'skip' }; } } } });
+ try {
+  await h.ensureSession('group:456');
+  h.getSocialV2State('group:456').recentMessages.push({ userId: '234', messageId: 'old', plain: '这种电池安全吗？', time: Date.now() });
+  await h.handleIncoming('group',456,{ user_id:345,self_id:999,group_id:456,message_id:991,sender:{nickname:'申请人'},message:[text('启动争论 '),at(234)] },h.cfg);
+  const r = h.debateRequests.list()[0];
+  assert.equal(r.topic,'电池安全性'); assert.equal(r.status,'pending');
+  assert.equal(h.debateTasks.tasks.size,0);
+ } finally { await h.close(); }
+});

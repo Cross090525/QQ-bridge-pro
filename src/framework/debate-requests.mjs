@@ -6,13 +6,15 @@ const clean = value => String(value ?? '').normalize('NFKC').trim();
 export function normalizeDebateWake(value = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw frameworkError('唤起配置须为对象');
   const phrases = value.phrases ?? ['开启辩论'];
+  const stopPhrases = value.stopPhrases ?? ['停止辩论'];
+  if (!Array.isArray(stopPhrases) || !stopPhrases.length || stopPhrases.length > 10 || stopPhrases.some(p => typeof p !== 'string' || !clean(p) || clean(p).length > 40 || /[\r\n|/@]/.test(clean(p))) || stopPhrases.some(p => phrases.includes(p))) throw frameworkError('停止语句无效或与启动语句重复');
   if (!Array.isArray(phrases) || !phrases.length || phrases.length > 10
     || phrases.some(p => typeof p !== 'string' || !clean(p) || clean(p).length > 40 || /[\r\n|/@]/.test(clean(p)))) throw frameworkError('唤起语句须为 1–10 条纯文字，每条 1–40 字，不能含换行、/、@、|');
   const durationMinutes = value.durationMinutes ?? 30;
   if (!Number.isSafeInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 120) throw frameworkError('有效期须为 1–120 分钟');
   const sendMode = value.sendMode ?? 'review';
   if (!['auto', 'review'].includes(sendMode)) throw frameworkError('发送方式无效');
-  return { enabled: value.enabled === true, phrases: [...new Set(phrases.map(clean))], durationMinutes,
+  return { enabled: value.enabled === true, stopPhrases: stopPhrases.map(clean), phrases: [...new Set(phrases.map(clean))], durationMinutes,
     sendMode, includeContext: value.includeContext === true };
 }
 
@@ -27,14 +29,14 @@ export function parseDebateWake(segments, config, selfId) {
   let rest = text.slice(phrase.length).trim();
   const targets = [...new Set(segments.filter(s => s.type === 'at').map(s => String(s.data?.qq)).filter(qq => qq !== String(selfId)))];
   if (!targets.length) {
-    const match = /^([1-9]\d*)\s+([\s\S]+)$/.exec(rest);
-    if (match) { targets.push(match[1]); rest = match[2]; }
+    const match = /^([1-9]\d*)(?:\s+([\s\S]+))?$/.exec(rest);
+    if (match) { targets.push(match[1]); rest = match[2] || ''; }
   }
   if (targets.length !== 1 || !id(targets[0]) || targets[0] === String(selfId)) throw frameworkError('请指定一个争论对象：唤起语句 @对象 议题 | 关键词1,关键词2（也可用 QQ 号代替 @）');
   const parts = rest.split('|');
   const topic = parts[0].trim();
-  const keywords = parts.length === 1 ? [topic] : [...new Set(parts[1].split(/[,，]/).map(clean).filter(Boolean))];
-  if (!topic || topic.length > 300 || parts.length > 2 || !keywords.length || keywords.length > 12 || keywords.some(w => !w || w.length > 60)) throw frameworkError('议题须为 1–300 字，关键词须为 1–12 个且每个不超过 60 字；长议题请用 | 单独指定关键词');
+  const keywords = parts.length === 1 ? (topic ? [topic] : []) : [...new Set(parts[1].split(/[,，]/).map(clean).filter(Boolean))];
+  if (topic.length > 300 || parts.length > 2 || (topic && !keywords.length) || keywords.length > 12 || keywords.some(w => !w || w.length > 60)) throw frameworkError('议题须为 1–300 字，关键词须为 1–12 个且每个不超过 60 字；长议题请用 | 单独指定关键词');
   return { targetId: targets[0], topic, keywords };
 }
 
@@ -46,7 +48,7 @@ export class DebateRequests {
   }
   configure(config) {
     this.config = normalizeDebateWake(config); this.revision++;
-    for (const r of this.requests.values()) if (r.status === 'pending') r.status = 'cancelled';
+    for (const r of this.requests.values()) if (['pending', 'preparing'].includes(r.status)) r.status = 'cancelled';
     return structuredClone(this.config);
   }
   list() {
@@ -56,7 +58,20 @@ export class DebateRequests {
   }
   receive({ key, userId, messageId, segments, selfId }) {
     if (String(userId) === String(selfId)) return null;
-    const input = parseDebateWake(segments, this.config, selfId);
+    const raw = clean((segments || []).map(s => s.type === 'text' ? s.data?.text || '' : '').join(''));
+    const stopPhrase = this.config.stopPhrases.find(p => raw === p || raw.startsWith(p + ' '));
+    let stopTask;
+    if (this.config.enabled && stopPhrase) {
+      if (segments.some(s => !['text', 'at', 'reply'].includes(s.type))) throw frameworkError('停止申请请用文字和@发送');
+      const targets = segments.filter(s => s.type === 'at' && String(s.data?.qq) !== String(selfId)).map(s => String(s.data.qq));
+      const suffix = raw.slice(stopPhrase.length).trim();
+      const tasks = [...this.tasks.tasks.values()].filter(t => t.key === key && ['active', 'paused'].includes(t.status) && t.expiresAt > this.now()
+        && (!targets.length || targets.includes(t.targetId)) && (!suffix || suffix === t.id || suffix === t.targetId));
+      if (tasks.length !== 1) throw frameworkError('请用停止语句 @对象 或任务编号，明确唯一的运行任务');
+      stopTask = tasks[0];
+    }
+    const input = stopTask ? { action: 'stop', taskId: stopTask.id, taskRevision: stopTask.revision, targetId: stopTask.targetId, topic: stopTask.topic, keywords: stopTask.keywords }
+      : parseDebateWake(segments, this.config, selfId);
     if (!input) return null;
     if (!id(userId) || !messageId) throw frameworkError('申请缺少可信的发送人或消息编号');
     const policy = this.assertGroup(key);
@@ -64,11 +79,11 @@ export class DebateRequests {
     const messageKey = `${key}:${messageId}`;
     if (this.seen.has(messageKey)) return { duplicate: true };
     if (this.seen.size >= 1000) throw frameworkError('近期申请过多，请稍后重试', 429);
-    const prior = [...this.requests.values()].find(r => r.key === key && r.requesterId === String(userId) && (['pending', 'starting'].includes(r.status) || this.now() - r.createdAt < 30000));
+    const prior = [...this.requests.values()].find(r => r.key === key && r.requesterId === String(userId) && (['pending', 'preparing', 'starting'].includes(r.status) || this.now() - r.createdAt < 30000));
     if (prior) { this.seen.set(messageKey, this.now()); return { duplicate: true, request: structuredClone(prior) }; }
     // Keep pending requests; evict only completed entries, and bound replay IDs.
     while (this.requests.size >= 100) {
-      const old = [...this.requests.values()].find(r => !['pending', 'starting'].includes(r.status));
+      const old = [...this.requests.values()].find(r => !['pending', 'preparing', 'starting'].includes(r.status));
       if (!old) throw frameworkError('待审核申请已满，请稍后重试', 429);
       this.requests.delete(old.id);
     }
@@ -90,6 +105,11 @@ export class DebateRequests {
     r.status = 'starting';
     let created;
     try {
+      if (r.action === 'stop') {
+        const task = this.tasks.get(r.taskId);
+        if (task.key !== r.key || task.revision !== r.taskRevision) throw frameworkError('任务已变化，请重新申请停止', 409);
+        this.tasks.control(r.taskId, 'stop'); r.status = 'approved'; return structuredClone(r);
+      }
       created = this.tasks.create(r, r.policy); r.taskId = created.task.id;
       await this.start(created);
       if (!this.config.enabled || r.configRevision !== this.revision || this.now() >= r.expiresAt) throw frameworkError('启动期间申请已失效', 409);

@@ -39,8 +39,12 @@ export function selectDebateBatch(events, after = 0) {
 }
 
 export function normalizeDebateState(value, allowed) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !['claims', 'questions', 'position'].includes(k))) throw Error('争点状态格式无效');
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !['claims', 'questions', 'position', 'currentTopic'].includes(k))) throw Error('争点状态格式无效');
   const result = { claims: [], questions: [], position: '' };
+  if (value.currentTopic !== undefined) {
+    if (typeof value.currentTopic !== 'string' || value.currentTopic.length > 300) throw Error('当前议题过长');
+    result.currentTopic = value.currentTopic;
+  }
   if (value.position !== undefined) {
     if (typeof value.position !== 'string' || value.position.length > 600) throw Error('立场说明过长');
     result.position = value.position;

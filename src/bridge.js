@@ -21,6 +21,7 @@ import { DebateTasks, handleDebateApi } from './framework/debate.mjs';
 import { projectDebateContext } from './framework/debate-context.mjs';
 import { DebateRequests, normalizeDebateWake } from './framework/debate-requests.mjs';
 import { ManagedDebateWorkers } from './framework/debate-workers.mjs';
+import { DshDebateAnalyzer } from './framework/debate-analyzer.mjs';
 import { UsageQuotas, normalizeQuotaConfig, QUOTA_RESOURCES } from './core/usage-quotas.mjs';
 let closeContentServices = async () => {};
 import os from 'node:os';
@@ -11318,7 +11319,7 @@ async function main() {
       if (!isOwner || key !== `private:${cfg.ownerQQ}`) { await sendToQQ(key, '争论启动审批仅管理员本人在机器人私聊中操作。'); return; }
       try {
         const request = await debateRequests.decide(debateDecision[2].toLowerCase(), debateDecision[1].toLowerCase());
-        await sendToQQ(key, request.status === 'approved' ? `已批准并启动争论任务 ${request.taskId}（${request.key}）。` : `已拒绝争论申请 ${request.id}。`);
+        await sendToQQ(key, request.status === 'approved' ? `已批准${request.action === 'stop' ? '停止' : '启动'}争论任务 ${request.taskId}（${request.key}）。` : `已拒绝争论申请 ${request.id}。`);
       } catch (error) { await sendToQQ(key, `审批未生效：${redactSensitiveText(error?.message || '申请已失效')}。`); }
       return;
     }
@@ -11328,9 +11329,25 @@ async function main() {
         if (result) {
           if (result.duplicate) return;
           const r = result.request;
+          if (r.action !== 'stop' && !r.topic) {
+            const state = workingEnabled() ? workingMemory.get(key) : { messages: getSocialV2State(key).recentMessages };
+            const messages = (state.messages || []).filter(m => String(m.userId) === r.targetId && !m.isSelf && String(m.text ?? m.plain ?? '').trim()).slice(-8)
+              .map((m, i) => ({ id: i + 1, messageId: m.messageId, userId: r.targetId, text: String(m.text ?? m.plain).slice(0, 1000), time: m.time }));
+            if (!messages.length) { debateRequests.requests.get(r.id).status = 'failed'; throw frameworkError('未找到对象近期发言，请补充议题或让对象先发言'); }
+            const stored = debateRequests.requests.get(r.id); stored.status = 'preparing';
+            try {
+              await consumeUsage(key, 'debate.analysis');
+              const analyzer = new DshDebateAnalyzer({ dsh: cfg.dsh, cwd: ROOT });
+              const proposal = await analyzer.analyze({ targetId: r.targetId, topic: '议题推断：仅从对象原文提炼议题，不反驳。verdict=skip，text为空，并提供proposedTopic。' }, messages, {});
+              if (!proposal.proposedTopic) throw Error('无法确定议题，请显式指定');
+              if (stored.configRevision !== debateRequests.revision || Date.now() >= stored.expiresAt) throw Error('推断期间申请已失效');
+              Object.assign(r, { topic: proposal.proposedTopic, keywords: [proposal.proposedTopic.slice(0, 60)], inferred: true });
+              Object.assign(stored, r, { status: 'pending' });
+            } catch (error) { stored.status = 'failed'; throw error; }
+          }
           // Only notify the actual owner private conversation; never disclose a task token.
           if (cfg.ownerQQ) {
-            try { await sendToQQ(`private:${cfg.ownerQQ}`, `争论启动申请 ${r.id}\n群：${id}；申请人：${r.requesterId}；对象：${r.targetId}\n议题：${r.topic}\n关键词：${r.keywords.join('、')}\n有效期：${r.durationMinutes}分钟；发送：${r.sendMode === 'auto' ? '任务内自动发送（不逐条审核）' : '每条草稿审核后发送'}；背景：${r.includeContext ? '本群相关近期文字和媒体摘要' : '仅启动后候选消息'}\n申请5分钟内有效，尚未运行。\n批准启动：/debate-approve ${r.id}\n拒绝：/debate-deny ${r.id}\n也可在争论管理页审核。`); }
+            try { await sendToQQ(`private:${cfg.ownerQQ}`, `争论${r.action === 'stop' ? '停止' : '启动'}申请 ${r.id}\n群：${id}；申请人：${r.requesterId}；对象：${r.targetId}\n议题：${r.topic}\n关键词：${r.keywords.join('、')}\n有效期：${r.durationMinutes}分钟；发送：${r.sendMode === 'auto' ? '任务内自动发送（不逐条审核）' : '每条草稿审核后发送'}；背景：${r.includeContext ? '本群相关近期文字和媒体摘要' : '仅启动后候选消息'}\n申请5分钟内有效；${r.action === 'stop' ? '批准前原任务继续运行' : '尚未运行，运行后跟随对象议题变化'}。\n批准申请：/debate-approve ${r.id}\n拒绝：/debate-deny ${r.id}\n也可在争论管理页审核。`); }
             catch { log('争论申请管理员私聊通知失败，请从争论管理页审核'); }
           }
           await sendToQQ(key, `争论申请已提交管理员，审核通过后才会运行。申请编号：${r.id}`);
