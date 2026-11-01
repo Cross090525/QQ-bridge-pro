@@ -21,7 +21,13 @@ export function parseDebateOutput(text, input) {
   let state;
   if (result.state !== undefined) {
     const allowed = new Set([...input.messages.map(m => m.id), ...['claims', 'questions'].flatMap(k => (input.debateState?.[k] || []).flatMap(x => x.evidenceIds))]);
-    state = normalizeDebateState(result.state, allowed);
+    // Optional memory entries without citations carry no evidence and must not
+    // be persisted. Keep strict validation for supplied/foreign citations.
+    const candidate = { ...result.state };
+    for (const key of ['claims', 'questions']) if (Array.isArray(candidate[key])) {
+      candidate[key] = candidate[key].filter(item => !Array.isArray(item?.evidenceIds) || item.evidenceIds.length > 0);
+    }
+    state = normalizeDebateState(candidate, allowed);
   }
   if (result.proposedTopic !== undefined && (typeof result.proposedTopic !== 'string' || !result.proposedTopic.trim() || result.proposedTopic.length > 300)) throw Error('推断议题无效');
   return { ...(result.proposedTopic ? { proposedTopic: result.proposedTopic.trim() } : {}), text: result.text, analysis: result.analysis, verdict: result.verdict, evidenceIds: result.evidenceIds, ...(state ? { state } : {}) };
