@@ -65,11 +65,7 @@ async function load(){
 }
 document.getElementById('create').onsubmit=run(async event=>{
   const f=new FormData(event.target);const result=await api('/api/debate/tasks',{key:'group:'+f.get('group'),targetId:f.get('target'),topic:f.get('topic'),keywords:String(f.get('keywords')).split(/[,，]/).map(x=>x.trim()).filter(Boolean),durationMinutes:Number(f.get('minutes')),sendMode:f.get('sendMode'),includeContext:f.get('includeContext')==='on'});
-  document.getElementById('credential').textContent='任务已创建。下载任务凭据后，用本机争论插件启动器打开。\n凭据仅供本机插件使用，请勿发到群里；页面刷新后将无法再次下载。';await load();
-  const download=document.getElementById('download');download.hidden=false;download.onclick=()=>{
-    const url=URL.createObjectURL(new Blob([JSON.stringify({...result,baseUrl:location.origin},null,2)],{type:'application/json'}));
-    const link=document.createElement('a');link.href=url;link.download='debate-task-'+result.task.id+'.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
-  };
+  document.getElementById('credential').textContent='任务已创建，本机分析器已启动。请在下方查看在线状态与分析结果。';document.getElementById('download').hidden=true;await load();
 });
 document.getElementById('refresh').onclick=run(load);run(load)();
 setInterval(()=>{if(!document.hidden)load().catch(e=>{status.textContent=e.message;});},3000);

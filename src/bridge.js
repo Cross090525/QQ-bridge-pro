@@ -3881,7 +3881,7 @@ async function main() {
           throw frameworkError('未知用量管理接口', 404);
         }
         if (debatePublic || url.pathname.startsWith('/api/debate/')) {
-          await handleDebateApi({ req, res, url, readBody, sendJson, tasks: debateTasks, requests: debateRequests, saveWakeConfig: saveDebateWakeConfig,
+          await handleDebateApi({ req, res, url, readBody, sendJson, tasks: debateTasks, requests: debateRequests, saveWakeConfig: saveDebateWakeConfig, startWorker: async credential => { debateTasks.get(credential.task.id).managedWorker = true; await debateWorkers.start(credential); },
             admin: tokenMatches && req.headers['x-agent-token'] === undefined && req.headers['x-agent-call'] === undefined && req.headers['x-debate-token'] === undefined });
           return;
         }

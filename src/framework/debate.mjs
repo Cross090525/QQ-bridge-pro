@@ -254,7 +254,7 @@ export class DebateTasks {
   }
 }
 
-export async function handleDebateApi({ req, res, url, readBody, sendJson, tasks, admin, requests, saveWakeConfig }) {
+export async function handleDebateApi({ req, res, url, readBody, sendJson, tasks, admin, requests, saveWakeConfig, startWorker }) {
   const external = url.pathname.startsWith('/api/v1/debate/');
   if (!external && !admin) throw frameworkError('争论任务管理仅供管理员控制台使用', 403);
   if (!external) {
@@ -265,7 +265,14 @@ export async function handleDebateApi({ req, res, url, readBody, sendJson, tasks
       const body = await readBody(); return sendJson({ ok: true, request: await requests.decide(body.requestId, body.decision) });
     }
     if (req.method === 'GET' && url.pathname === '/api/debate/tasks') return sendJson({ ok: true, tasks: [...tasks.tasks.values()].map(t => tasks.view(t)) });
-    if (req.method === 'POST' && url.pathname === '/api/debate/tasks') return sendJson({ ok: true, ...tasks.create(await readBody()) });
+    if (req.method === 'POST' && url.pathname === '/api/debate/tasks') {
+      const input = await readBody();
+      const created = tasks.create(input);
+      if (!startWorker || input.externalWorker === true) return sendJson({ ok: true, ...created });
+      try { await startWorker(created); tasks.live(tasks.get(created.task.id)); }
+      catch (error) { try { tasks.control(created.task.id, 'stop'); } catch {} throw error; }
+      return sendJson({ ok: true, task: tasks.view(tasks.get(created.task.id)) });
+    }
     const body = req.method === 'POST' ? await readBody() : null;
     if (req.method === 'POST' && url.pathname === '/api/debate/control') return sendJson({ ok: true, task: tasks.control(body.taskId, body.action) });
     if (req.method === 'GET' && url.pathname === '/api/debate/drafts') {

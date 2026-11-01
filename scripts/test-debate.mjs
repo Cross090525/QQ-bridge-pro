@@ -28,7 +28,7 @@ async function fixture(run, config = {}) {
     return { status: r.status, data: await r.json() };
   };
   const create = async extra => {
-    const r = await request('/api/debate/tasks', taskInput(extra));
+    const r = await request('/api/debate/tasks', { ...taskInput(extra), externalWorker: true });
     assert.equal(r.status, 200, JSON.stringify(r.data));
     const client = new DebateClient({ baseUrl, taskId: r.data.task.id, token: r.data.token });
     // Legacy assertion helpers now explicitly acquire a server batch before submission.
@@ -262,7 +262,7 @@ test('analysis cancellation stops and archives the isolated DSH session', async 
   };
   const controller = new AbortController();
   const analyzer = new DshDebateAnalyzer({ api, cwd: '/fixture' });
-  const work = analyzer.analyze({ topic: '电池', targetId: '234' }, [{ id: 1, text: '电池' }], { signal: controller.signal });
+  const work = analyzer.analyze({ externalWorker: true, topic: '电池', targetId: '234' }, [{ id: 1, text: '电池' }], { signal: controller.signal });
   await prompted; controller.abort();
   await assert.rejects(work, /事件流已结束/);
   assert.equal(stopped, true); assert.equal(archived, true);
@@ -288,13 +288,13 @@ test('DSH adapter uses a separate tool-free preset, parses drafts and archives i
     workspace: { archiveSession: async input => { calls.push(['archive', input]); return ok({}); } },
   };
   const analyzer = new DshDebateAnalyzer({ api, cwd: '/fixture' });
-  const result = await analyzer.analyze({ topic: '电池', targetId: '234', token: 'not-for-model' }, [{ id: 1, userId: '234', text: '电池', reasons: ['target'] }]);
+  const result = await analyzer.analyze({ externalWorker: true, topic: '电池', targetId: '234', token: 'not-for-model' }, [{ id: 1, userId: '234', text: '电池', reasons: ['target'] }]);
   assert.equal(result.verdict, 'uncertain');
   assert.equal(calls[0].agentPreset, 'qq-debate');
   assert.ok(!JSON.stringify(calls).includes('not-for-model'));
   assert.ok(calls.some(c => c[0] === 'archive'));
   endReason = { kind: 'error' };
-  await assert.rejects(analyzer.analyze({ topic: '电池', targetId: '234' }, [{ id: 1, text: '电池' }]), /正常完成/);
+  await assert.rejects(analyzer.analyze({ externalWorker: true, topic: '电池', targetId: '234' }, [{ id: 1, text: '电池' }]), /正常完成/);
   api.agentPresets.list = async () => ok({ presets: [{ id: 'standard' }] });
-  await assert.rejects(analyzer.analyze({ topic: '电池', targetId: '234' }, [{ id: 1, text: '电池' }]), /安装 qq-debate/);
+  await assert.rejects(analyzer.analyze({ externalWorker: true, topic: '电池', targetId: '234' }, [{ id: 1, text: '电池' }]), /安装 qq-debate/);
 });
