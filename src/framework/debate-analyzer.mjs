@@ -45,7 +45,12 @@ export class DshDebateAnalyzer {
     const result = await this.run(input, { signal, timeoutMs });
     if (hasMore) return { ...result, verdict: 'skip', text: '' };
     if (result.verdict === 'skip' || !context.persona) return result;
-    const expressed = await this.run({ ...input, phase: 'expression', context: { ...input.context, persona: context.persona }, draft: result }, { signal, timeoutMs });
+    let expressed;
+    try { expressed = await this.run({ ...input, phase: 'expression', context: { ...input.context, persona: context.persona }, draft: result }, { signal, timeoutMs }); }
+    catch (error) {
+      if (error.code === 'DEBATE_OUTPUT_INVALID') return result;
+      throw error;
+    }
     if (expressed.verdict !== result.verdict || JSON.stringify(expressed.evidenceIds) !== JSON.stringify(result.evidenceIds)) throw new Error('人设表达改变了结论或引用，拒绝发送');
     return { ...result, text: expressed.text };
   }
@@ -82,7 +87,8 @@ export class DshDebateAnalyzer {
             if (ended) {
               controller.signal.throwIfAborted();
               if ((ended.reason?.kind ?? ended.reason) !== 'completed') throw new Error('DSH 分析未正常完成，结果不会发送');
-              return parseDebateOutput(ended.text, input);
+              try { return parseDebateOutput(ended.text, input); }
+              catch (error) { error.code = 'DEBATE_OUTPUT_INVALID'; throw error; }
             }
           }
         }
