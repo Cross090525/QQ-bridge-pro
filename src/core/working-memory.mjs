@@ -77,11 +77,11 @@ export class WorkingMemory {
     const packet = { revision: state.revision, updatedAt: state.updatedAt || null,
       topics: state.topics.map(t => ({ ...t, status: t.status === 'active' && now - t.updatedAt > 3600000 ? 'dormant' : t.status })),
       facts: state.facts, questions: state.questions, uncertainties: state.uncertainties,
-      decision: state.decision, media: state.media.slice(-20), messages,
+      decision: state.decision && { ...state.decision, historical: true, stale: matching.some(m => !m.isSelf && m.time > state.decision.updatedAt) }, media: state.media.slice(-20), messages,
       pendingCount: pending.length, totalMessages: state.messages.length, matchedMessages: matching.length,
       truncated: matching.length > messages.length || messages.some(m => m.excerpt) };
     // Keep newest raw context and compact structured state. Never pretend omitted data was presented.
-    while (JSON.stringify(packet).length > maxChars && packet.messages.length > 1) { packet.messages.pop(); packet.truncated = true; }
+    while (JSON.stringify(packet).length > maxChars && packet.messages.length > 1) { packet.messages.shift(); packet.truncated = true; }
     while (JSON.stringify(packet).length > maxChars && packet.media.length) { packet.media.shift(); packet.truncated = true; }
     for (const k of ['facts', 'questions', 'uncertainties', 'topics']) {
       packet[k] = [...packet[k]];

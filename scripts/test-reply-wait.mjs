@@ -123,7 +123,9 @@ test('reply timeout is a hard budget and cannot grant sleep observation, even wi
 
 test('ordinary and omitted purpose keep waiting for future messages', () => fixture(async ({ st, request, append }) => {
   append('already known');
-  await request('unread');
+  const seen = await request('unread');
+  const marked = await request('mark-read', { throughSeq: seen.data.readThroughSeq });
+  assert.equal(marked.status, 200);
   st.lastIncomingAt = Date.now() - 10000;
   for (const purpose of [undefined, 'messages']) {
     const result = await request('wait', { purpose, timeoutMs: 600, quietMs: 100 });
@@ -201,4 +203,14 @@ test('each reply-wait buffer obeys its own tool switch, never the other one', ()
   const r3 = await request('wait', { purpose: 'reply', timeoutMs: 1200, quietMs: 100 });
   assert.deepEqual(r3.data.newMessages, []);
   assert.equal(r3.data.readThroughSeq, 5, 'a message nobody was allowed to see may not advance the watermark');
+}));
+
+test('existing unread returns immediately before waiting and acknowledgment needs no sleep observation', () => fixture(async ({st,request,append}) => {
+ append('new instruction');
+ const pending = await request('wait',{purpose:'messages',timeoutMs:600});
+ assert.equal(pending.data.existingUnread,true); assert.equal(pending.data.waitedMs,0);
+ assert.equal(pending.data.newMessages.length,1);
+ const marked = await request('mark-read',{throughSeq:pending.data.readThroughSeq});
+ assert.equal(marked.status,200); assert.equal(st.unread.length,0);
+ assert.equal(st.preSleepWaitSatisfiedAt,0);
 }));
