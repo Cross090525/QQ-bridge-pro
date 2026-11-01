@@ -12,6 +12,7 @@ Connect QQ groups and private conversations to DeepSeek Harness (DSH). Agents re
 | --- | --- |
 | QQ messaging | Group/private routing, unread reads, quoted replies, waits, read watermarks, allowlists and pause controls |
 | Working context | Social v2 observes automatically and maintains scoped raw context, topics, media state and participation decisions. [Guide](docs/guides/WORKING_MEMORY.md) |
+| Usage quotas | One console for count/window rules, automatic renewal, early-reset approval and resumable work with a five-minute wait deadline. [Guide](docs/guides/USAGE_QUOTAS.md) |
 | On-demand context | Additional history, slang, persona and external long-term memory remain available through scoped queries |
 | Extension interfaces | Conversation-scoped API v1, dependency-free `QQBridgeClient`, external MCP/skill-runner examples |
 | Content services | Typed content with `sourceId`; agent-selected calls to fixed registered MCP/HTTP providers |
@@ -21,7 +22,7 @@ Connect QQ groups and private conversations to DeepSeek Harness (DSH). Agents re
 | Output | Text, links, images, stickers and voice handles; **no speech-generation/TTS provider is integrated** |
 | External memory | Replaceable HTTP/MCP providers, Haitang adapter and conversation namespaces; no old built-in fallback |
 | Authorization | Conversation/capability/data-scope grants, single-use approvals, owner QQ notifications, private commands and audit |
-| Business extensions | Explicitly authorized, time-limited debate tasks with a separate analysis worker |
+| Business extensions | Console-created tasks automatically start a managed worker; group start/stop requests require admin approval. Topics can be inferred and tracked as the target changes subject. [Guide](docs/guides/DEBATE_PLUGIN.md) |
 
 Providers must be prepared and configured separately. An available interface does not mean every provider is installed or every incoming message is automatically recognized.
 
@@ -245,3 +246,11 @@ This framework combines substantial work from multiple projects. Their authors a
 Work added here includes scoped APIs/client, on-demand context routing, content registration/permissions, owner QQ approval notices, single-use permits, provider-based memory, bounded timeline evidence, integration tests and documentation. Underlying models, gateway, runtime and upstream extraction/retrieval modules remain the work of their respective projects.
 
 The repository retains the [MIT license and original copyright notice](LICENSE). Third-party software, models, binaries and services retain their own licenses and terms; integration does not relicense them. SnowLuma itself and media model/runtime assets are not distributed here. Preserve original attribution, licenses and provenance records.
+
+## Current runtime behavior
+
+Ordinary chat receives a separate preview of the newest unread messages. Normal waits return existing unacknowledged text before waiting for future input. Read acknowledgment no longer requires five minutes of observation; sleep configuration retains its observation checks. Historical participation decisions do not describe new messages. See [working memory](docs/guides/WORKING_MEMORY.md).
+
+Only configured quota rules apply. Legacy minute/hour settings no longer stack or migrate automatically; resources without rules have no count budget. Explicit overlapping windows still apply together. Group debate requests may omit the topic; the inferred topic is presented for approval. Custom stop phrases also require approval. Bridge restarts invalidate in-memory debate tasks.
+
+For the DSH large-image base64 stack overflow, see the [reversible compatibility patch](docs/guides/DSH_IMAGE_BASE64.md). It patches the local DSH installation and must be checked after upgrades.
