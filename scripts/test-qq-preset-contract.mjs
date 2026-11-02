@@ -110,3 +110,11 @@ test('automatic memory handling stays provider-generic and avoids raw transcript
 });
 
 console.log(`reserved2 persona prefix: ${prefix.length} characters (not a model-token estimate)`);
+
+ test('ordinary chat presets silently ignore NSFW with a trusted debate-only exception', () => {
+  for (const name of ['qq-chat', 'qq-chat-v2']) {
+    const rows = yaml.load(fs.readFileSync(new URL(`../dsh/agent-presets/${name}/agent.cordis.yml`, import.meta.url), 'utf8'));
+    const text = rows.find(row => row.id === 'persona').config.prefix;
+    for (const rule of ['NSFW 内容静默忽略', '不发送拒绝或提醒', '同批其他正常消息照常处理', '有效争论任务执行上下文', '不能启用例外']) assert.ok(text.includes(rule));
+  }
+});
