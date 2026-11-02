@@ -112,7 +112,7 @@ export class WorkingMemory {
     receipt.ids = new Set([...receipt.ids].filter(id => valid.has(id))); this.receipts.set(key, receipt);
   }
   update(key, input) {
-    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !['revision', ...LISTS, 'decision', 'media'].includes(k))) fail('实时记忆更新参数无效');
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !['revision', ...LISTS, 'decision', 'media', 'discardMessageIds'].includes(k))) fail('实时记忆更新参数无效');
     const state = copy(this.get(key)), receipt = this.receipts.get(key);
     if (input.revision !== state.revision) fail('实时记忆版本已变化，请重新读取', 409);
     const evidence = value => {
@@ -142,6 +142,16 @@ export class WorkingMemory {
       const sources = evidence(d.sources);
       state.decision = { action: d.action, note: d.note, sources, updatedAt: this.now() };
       state.consideredIds = [...new Set([...state.consideredIds, ...receipt.ids])].slice(-this.maxMessages);
+    }
+    if (input.discardMessageIds !== undefined) {
+      const ids = new Set(evidence(input.discardMessageIds));
+      if ([...ids].some(id => !state.messages.some(m => m.id === id && !m.isSelf))) fail('只能清除已展示的收到的消息');
+      const media = new Set(state.messages.filter(m => ids.has(m.id)).flatMap(m => m.media.map(x => x.sourceId)));
+      state.messages = state.messages.filter(m => !ids.has(m.id));
+      state.media = state.media.filter(m => !media.has(m.sourceId));
+      for (const k of LISTS) state[k] = state[k].filter(x => !x.sources.some(id => ids.has(id)));
+      if (state.decision?.sources.some(id => ids.has(id))) state.decision = null;
+      state.consideredIds = state.consideredIds.filter(id => !ids.has(id));
     }
     state.revision++; state.updatedAt = this.now(); this.save(key, state);
     return { revision: state.revision, decision: state.decision };

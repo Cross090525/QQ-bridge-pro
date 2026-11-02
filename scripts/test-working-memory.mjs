@@ -257,3 +257,18 @@ test('main frames/transcript fallback preserves visual evidence when audio recog
       permissions: { rules: ['frames', 'transcript'].map(name => ({ key: KEY, capability: 'bilibili.' + name, decision: 'allow', dataScopes: ['source-reference'] })) } } });
   } finally { provider.closeAllConnections(); await new Promise(r => provider.close(r)); }
 });
+
+test('discard requires shown sources and removes durable raw and derived state', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'discard-memory-'));
+  try {
+    const memory = new WorkingMemory(dir);
+    memory.record(KEY, source('qq:1', 'remove this'));
+    memory.record(KEY, source('qq:2', 'keep this'));
+    assert.throws(() => memory.update(KEY, {revision: 0, discardMessageIds: ['qq:1']}));
+    memory.offered(KEY, memory.snapshot(KEY));
+    memory.update(KEY, {revision: 0, topics: [item('derived', ['qq:1'])], discardMessageIds: ['qq:1']});
+    const restored = new WorkingMemory(dir).get(KEY);
+    assert.deepEqual(restored.messages.map(m => m.id), ['qq:2']);
+    assert.deepEqual(restored.topics, []);
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+});

@@ -5424,7 +5424,20 @@ async function main() {
           }
           if (req.method !== 'POST' || !req.headers['x-agent-token']) throw frameworkError('更新需要当前会话令牌', 403);
           const { key: ignoredKey, ...input } = body;
+          const discarded = workingMemory.get(key).messages.filter(m => Array.isArray(input.discardMessageIds) && input.discardMessageIds.includes(m.id));
           const result = workingMemory.update(key, input);
+          if (discarded.length) {
+            const st = getSocialV2State(key);
+            const matches = m => discarded.some(d => (d.messageId && String(m.messageId) === d.messageId) || (d.seq != null && m.seq === d.seq && m.time === d.time));
+            st.recentMessages = st.recentMessages.filter(m => !matches(m));
+            st.unread = st.unread.filter(m => !matches(m));
+            for (const m of discarded) {
+              messageMediaStore.get(key)?.delete(m.messageId);
+              for (const ref of m.media) contentSources.items.delete(ref.sourceId);
+            }
+            contentSources.onChange([...contentSources.items.values()]);
+            saveSocialV2State();
+          }
           if (input.decision && workingMemory.snapshot(key).pendingCount > 0) scheduleWakeV2(key, 'observationContinuation');
           sendJson({ ok: true, key, ...result }); return;
         }
