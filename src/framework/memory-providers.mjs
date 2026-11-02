@@ -122,6 +122,7 @@ function normalizeResponse(raw, request, providerId) {
     object(item, ['id', 'text', 'category', 'subject', 'metadata', 'score', 'expiresAt', 'updatedAt']);
     return { id: identifier(item.id), text: text(item.text, 8000), category: text(item.category, 128), subject: text(item.subject, 128),
       ...(item.metadata === undefined ? {} : { metadata: metadata(item.metadata) }),
+      ...(item.updatedAt === undefined ? {} : { updatedAt: integer(item.updatedAt, 0, 0, Number.MAX_SAFE_INTEGER) }),
       ...(item.expiresAt === undefined ? {} : { expiresAt: integer(item.expiresAt, 0, 0, Number.MAX_SAFE_INTEGER) }) };
   }).filter(item => !item.expiresAt || item.expiresAt > Date.now());
   const result = { providerId, operation: 'query', items: [], nextCursor: raw.nextCursor == null ? null : text(raw.nextCursor, 256), truncated: false, untrusted: true };

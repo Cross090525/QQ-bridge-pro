@@ -81,7 +81,7 @@ export class HaitangMemoryProvider {
         }
         if (input.cursor && !/^\d{1,6}$/.test(input.cursor)) throw new Error('无效的分页游标');
         const offset = input.cursor ? Number(input.cursor) : input.offset;
-        return { ...envelope, items: candidates.slice(offset, offset + input.limit), nextCursor: offset + input.limit < candidates.length ? String(offset + input.limit) : null };
+        return { ...envelope, items: candidates.slice(offset, offset + input.limit).map(item => ({ ...item, ...(Number.isFinite(Date.parse(String(timestamps.get(item.id)).replace(' ', 'T') + ':00Z')) ? {updatedAt: Date.parse(String(timestamps.get(item.id)).replace(' ', 'T') + ':00Z')} : {}) })), nextCursor: offset + input.limit < candidates.length ? String(offset + input.limit) : null };
       }
       let next = records.slice(); const affectedIds = [];
       const put = item => {
@@ -98,7 +98,7 @@ export class HaitangMemoryProvider {
       }
       else if (operation === 'ingest') {
         for (const message of input.messages) put({ id: `msg-${crypto.createHash('sha256').update(JSON.stringify(message)).digest('hex').slice(0, 24)}`,
-          text: message.text, category: 'message', subject: message.userId ?? '', metadata: { messageId: message.messageId, sender: message.sender, seq: message.seq } });
+          text: message.text, category: 'message', subject: message.userId ?? '', metadata: { messageId: message.messageId, sender: message.sender, seq: message.seq, eventAt: message.time, timeZone: 'Asia/Shanghai' } });
       } else if (operation === 'update') {
         for (const item of records.filter(item => this.matches(item, input.selector))) put({ ...item, ...input.patch });
       } else if (operation === 'delete' || operation === 'clear') {

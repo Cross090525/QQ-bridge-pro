@@ -1,3 +1,4 @@
+import { resolveTime } from './core/time-reference.mjs';
 // 安全版 QQ MCP server（stdio）。由 DSH 的 MCP 客户端 spawn。
 //
 // 安全设计：
@@ -315,6 +316,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_send_content: 'contentSend',
   qq_context_query: 'contextQuery',
   qq_working_memory: 'contextQuery',
+  qq_time_resolve: 'contextQuery',
   qq_get_prompt: 'getPrompt',
   qq_get_unread_messages: 'getUnread',
   qq_get_recent_messages: 'getRecent',
@@ -951,7 +953,14 @@ server.tool('qq_memory', '通过开放记忆接口调用插件。query: query/me
   } catch (error) { return { content: [{ type: 'text', text: `记忆插件调用失败：${error.message}` }], isError: true }; }
 });
 
-server.tool('qq_working_memory', '读取或更新当前群的实时工作记忆。read返回snapshot，input可用query关键词或messageId=messages.id回看原文；update须带revision。topics/facts/questions/uncertainties为完整替换列表，每项{text,status:active|dormant|resolved,certainty:reported|confirmed|inferred,sources:实际展示的messages.id数组}。media为[{sourceId,summary}]，仅总结已看到证据的媒体。decision为{action:observe|need_context|reply,note:简短依据,sources}，不保存完整思考；reply不自动发送。不被@不等于无关，媒体未知时先补信息。', {
+server.tool('qq_time_resolve', '涉及相对日期必须使用：referenceTime为原消息发生时刻的Unix毫秒时间戳，不是记忆写入或更新时间；offsetDays为昨天=-1、今天=0、明天=1等日历日期偏移。返回明确日期及是否今天。缺少原消息时间先查询，不猜测。默认时区Asia/Shanghai；不解析钟点或周/月。', {
+  referenceTime: z.number().int().positive(), offsetDays: z.number().int().min(-36600).max(36600), timeZone: z.string().optional(),
+}, async input => {
+  try { return {content:[{type:'text', text:JSON.stringify(resolveTime(input))}]}; }
+  catch (error) { return {isError:true, content:[{type:'text',text:error.message}]}; }
+});
+
+server.tool('qq_working_memory', '读取或更新当前群的实时工作记忆。read返回snapshot，input可用query关键词或messageId=messages.id回看原文；update须带revision。发现NSFW时用discardMessageIds:[已展示的messages.id]清除近期缓存、未读及关联工作状态，每次最多10条。topics/facts/questions/uncertainties为完整替换列表，每项{text,status:active|dormant|resolved,certainty:reported|confirmed|inferred,sources:实际展示的messages.id数组}。media为[{sourceId,summary}]，仅总结已看到证据的媒体。decision为{action:observe|need_context|reply,note:简短依据,sources}，不保存完整思考；reply不自动发送。不被@不等于无关，媒体未知时先补信息。', {
   key: z.string(), token: z.string().min(1), operation: z.enum(['read', 'update']),
   input: z.record(z.string(), z.unknown()).optional(),
 }, async ({ key, token, operation, input }) => {
