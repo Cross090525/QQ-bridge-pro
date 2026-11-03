@@ -755,6 +755,9 @@ pre {
 .settings-content>.row label {
   flex-basis:100px!important
 }
+#participationPanel .participation-options label {
+  flex-basis:auto!important
+}
 .settings-content>.row>.meta {
   flex-basis:180px!important
 }
@@ -2237,6 +2240,18 @@ button:active:not(:disabled) {
       </div></details>
 <details class="settings-group" id="quotaPanel"><summary>用量与额度</summary><div class="settings-content"><p>统一设置图片、视频及其他调用次数。达限后暂缓，到期自动恢复；也可通知管理员批准一次提前重置。</p><button type="button" onclick="location.href='/quotas?token='+encodeURIComponent(localStorage.getItem('consoleToken')||'')">打开用量与额度</button></div></details>
 <details class="settings-group" id="debatePanel"><summary>争论辅助</summary><div class="settings-content"><p>管理员指定群、对象、议题和有效期，可一次授权任务内自动发言。启用统一额度后仍受相应分析与发送额度约束。</p><button type="button" onclick="location.href='/debate?token='+encodeURIComponent(localStorage.getItem('consoleToken')||'')">打开争论任务管理</button></div></details>
+<details class="settings-group" id="participationPanel"><summary>接话与参与</summary><div class="settings-content">
+<p class="meta">为空时设置全局默认，也可输入群号单独设置。明确找机器人时正常交流；开放话题按风格自然参与，明确对别人说的话默认观察。保存后下一次读取或唤醒生效。</p>
+<div class="row"><input id="participationKey" type="text" placeholder="留空设置全局默认，或输入群号" style="flex:1"><button id="participationLoad" class="small">加载设置与状态</button></div>
+<div class="row"><label for="participationStyle">参与风格</label><select id="participationStyle"><option value="cautious">谨慎：必要回答与补充</option><option value="natural">自然：像普通群友一样交流</option><option value="active">活跃：更主动参与开放话题</option></select></div>
+<div class="row participation-options" style="flex-wrap:wrap">
+<label style="display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;width:auto"><input id="participationHumor" type="checkbox" style="width:auto"> 允许玩笑与接梗</label>
+<label style="display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;width:auto"><input id="participationEmpathy" type="checkbox" style="width:auto"> 允许共鸣与自然反应</label>
+<label style="display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;width:auto"><input id="participationFollowUp" type="checkbox" style="width:auto"> 无人承接时允许一次必要补充</label>
+</div>
+<div class="row"><button id="participationSave" class="small">保存接话设置</button><button id="participationInherit" class="small">本群恢复继承</button><span id="participationMsg" class="meta" role="status"></span></div>
+<pre id="participationStatus">加载后查看当前参与状态与最近记录。记录只含动作、简短原因和来源编号。</pre>
+</div></details>
 <details class="settings-group" id="workingMemoryPanel"><summary>实时工作记忆</summary><div class="settings-content">
 <p class="meta">持续理解近期聊天、媒体与话题，再决定是否发言。每个群独立保存；长期记忆仍使用下方提供者。</p>
 <div class="row"><label style="display:flex;align-items:center;gap:8px;flex:1;width:auto"><input type="checkbox" id="workingMemoryEnabled" style="width:auto;flex:none"> 自动观察与实时工作记忆</label><button id="workingMemorySave" class="small">保存观察设置</button></div>
@@ -3748,6 +3763,47 @@ async function loadV2Memory() {
   try { renderV2Memory(await memoryConsoleRequest('/api/socialV2/memory?key=' + encodeURIComponent(key))); }
   catch (error) { msg.textContent = error.message; msg.className = 'meta err'; }
 }
+let loadedParticipationKey = null;
+function participationKey() {
+  let key = document.getElementById('participationKey').value.trim();
+  if (/^[1-9]\d{0,15}$/.test(key)) key = 'group:' + key;
+  if (key && !/^group:[1-9]\d{0,15}$/.test(key)) throw new Error('请输入有效群号；私聊按当前来信自然回应');
+  return key;
+}
+async function participationRequest(mode = 'load') {
+  const msg = document.getElementById('participationMsg');
+  const controls = ['participationKey', 'participationLoad', 'participationSave', 'participationInherit', 'participationStyle', 'participationHumor', 'participationEmpathy', 'participationFollowUp'].map(id => document.getElementById(id));
+  try {
+    const key = participationKey();
+    if (mode !== 'load' && loadedParticipationKey !== key) throw new Error('会话已改变，请先加载该范围的设置');
+    if (mode === 'inherit' && !key) throw new Error('恢复继承需要输入群号');
+    controls.forEach(el => el.disabled = true); msg.textContent = '正在处理…'; msg.className = 'meta';
+    const body = mode === 'inherit' ? { key, inherit: true } : { key, policy: {
+      style: document.getElementById('participationStyle').value,
+      allowHumor: document.getElementById('participationHumor').checked,
+      allowEmpathy: document.getElementById('participationEmpathy').checked,
+      allowFollowUp: document.getElementById('participationFollowUp').checked,
+    } };
+    const r = mode === 'load' ? await api('/api/socialV2/participation?key=' + encodeURIComponent(key)) : await api('/api/socialV2/participation', 'POST', body);
+    if (!r.ok) throw new Error(r.error || '接话设置操作失败');
+    loadedParticipationKey = key; document.getElementById('participationKey').value = key;
+    document.getElementById('participationStyle').value = r.policy.style;
+    document.getElementById('participationHumor').checked = r.policy.allowHumor;
+    document.getElementById('participationEmpathy').checked = r.policy.allowEmpathy;
+    document.getElementById('participationFollowUp').checked = r.policy.allowFollowUp;
+    const phases = { observing: '旁听', invited: '被邀请', engaged: '正在参与', yielding: '让出话头' }, s = r.status;
+    const actions = { observe: '继续观察', need_context: '补充上下文', reply: '准备发言', sent: '已发送', recheck: '复核后再发' };
+    const rows = s ? ['当前状态：' + (phases[s.phase] || s.phase), '近一小时已记录参与：' + s.activity.turnsLastHour + ' 次，近期缓存中发送 ' + s.activity.messagesLastHour + ' 条', '', '最近记录（准备发言不等于已发送）：',
+      ...s.history.slice().reverse().map(x => new Date(x.at).toLocaleString() + ' · ' + (actions[x.action] || '继续观察') + ' · ' + x.reasonText + (x.sources.length ? ' · 来源 ' + x.sources.join(', ') : ''))] : ['该范围尚无运行状态。'];
+    document.getElementById('participationStatus').textContent = rows.join('\n');
+    msg.textContent = (mode === 'load' ? '已加载：' : '已保存，下次读取或唤醒生效：') + (key ? key + (r.override ? '（独立设置）' : '（继承全局）') : '全局默认');
+  } catch (error) { msg.textContent = error.message || '操作失败'; msg.className = 'meta err'; }
+  finally { controls.forEach(el => el.disabled = false); document.getElementById('participationInherit').disabled = !loadedParticipationKey; }
+}
+document.getElementById('participationLoad').addEventListener('click', () => participationRequest());
+document.getElementById('participationSave').addEventListener('click', () => participationRequest('save'));
+document.getElementById('participationInherit').addEventListener('click', () => participationRequest('inherit'));
+participationRequest();
 async function loadWorkingMemorySettings() {
   try { const r = await api('/api/socialV2/config'); document.getElementById('workingMemoryEnabled').checked = r.config?.workingMemory?.enabled !== false; } catch {}
 }
@@ -3981,6 +4037,7 @@ document.getElementById('v2SessionSelect').addEventListener('change', (ev) => {
   if (!key) return;
   document.getElementById('v2StateKey').value = key;
   document.getElementById('workingMemoryKey').value = key;
+  document.getElementById('participationKey').value = key.startsWith('group:') ? key : '';
   document.getElementById('v2MemoryKey').value = key;
   document.getElementById('v2WakeKey').value = key;
   document.getElementById('v2InitPromptKey').value = key;

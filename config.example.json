@@ -158,6 +158,10 @@
       "getSelfImage": true,
       "sendVoice": false
     },
+    "participation": {
+      "defaults": { "style": "natural", "allowHumor": true, "allowEmpathy": true, "allowFollowUp": false },
+      "groups": {}
+    },
     "wake": {
       "defaultMode": "diving",
       "preSleepWaitEnabled": true,

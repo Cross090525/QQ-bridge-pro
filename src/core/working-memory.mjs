@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { normalizeAddressing } from './participation.mjs';
+import { normalizeAddressing, participationDecisionFields } from './participation.mjs';
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
 const copy = value => structuredClone(value);
 const str = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
@@ -143,7 +143,7 @@ export class WorkingMemory {
       const d = input.decision;
       if (!d || !['observe', 'need_context', 'reply'].includes(d.action) || typeof d.note !== 'string' || d.note.length > 300) fail('参与决策必须为observe/need_context/reply和简短说明');
       const sources = evidence(d.sources);
-      state.decision = { action: d.action, note: d.note, sources, updatedAt: this.now() };
+      state.decision = { action: d.action, note: d.note, sources, ...participationDecisionFields(d), updatedAt: this.now() };
       state.consideredIds = [...new Set([...state.consideredIds, ...receipt.ids])].slice(-this.maxMessages);
     }
     if (input.discardMessageIds !== undefined) {

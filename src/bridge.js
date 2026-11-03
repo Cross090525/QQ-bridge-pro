@@ -11,7 +11,7 @@ import { normalizeDualMode, createDualModeRouter, legacyModeOf } from './core/du
 import { CONTEXT_KINDS, normalizeContextQuery, queryConversationContext } from './core/context-query.mjs';
 import { selectRelevantSlang } from './slang-reference.mjs';
 import { SlangReferenceStore } from './core/slang-reference-store.mjs';
-import { messageAddressing, normalizeAddressing, participationContext } from './core/participation.mjs';
+import { messageAddressing, normalizeAddressing, normalizeParticipationConfig, normalizeParticipationPolicy, normalizeParticipationState, ParticipationManager } from './core/participation.mjs';
 import { BRIDGE_API_VERSION, PUBLIC_API_ROUTES, resolvePublicApiRoute } from './core/public-api.mjs';
 import { ContentSourceStore, normalizeIncomingContent, normalizeOutgoingContent, frameworkError } from './framework/content.mjs';
 import { FrameworkMediaStore } from './framework/media-store.mjs';
@@ -899,6 +899,7 @@ function loadConfig() {
     }
   };
 
+  cfg.socialV2.participation = normalizeParticipationConfig(cfg.socialV2.participation ?? {});
   cfg.socialV2.context = {
     strategy: 'on-demand', recentLimit: 100, unreadLimit: 30, contextWindow: 20,
     inlineWakeMessages: true, wakeMessageLimit: 12, wakeRecentLimit: 4, wakeMaxChars: 6000,
@@ -1528,6 +1529,7 @@ async function main() {
   const contentServices = new ContentServiceRuntime({ services: cfg.framework?.services ?? [], permissions: extensionPermissions,
     mediaStore: frameworkMedia, readSource: readFrameworkSource, beforeExecute: ({ key, source, service }) => source ? mediaUsage(key, source, service.id) : null });
   const workingMemory = new WorkingMemory(path.join(STATE_DIR, 'working-memory'));
+  const participation = new ParticipationManager({ getState: getSocialV2State, getConfig: () => cfg.socialV2?.participation ?? {} });
   const observationJobs = new Map();
   const observationStartedAt = Date.now();
   const observationQueue = new ObservationQueue();
@@ -2225,6 +2227,7 @@ async function main() {
   function recordVoiceSentV2(key, sent, label) {
     const st = getSocialV2State(key);
     const display = label || `[语音 ${sent.detail}]`;
+    participation.sent(key, 1);
     const entry = {
       messageId: sent.messageId ? String(sent.messageId) : null,
       sender: '我',
@@ -2234,7 +2237,7 @@ async function main() {
       isOwner: true,
       ownerLabel: '我',
       isSelf: true,
-      at: Date.now()
+      at: Date.now(), time: Date.now()
     };
     if (workingEnabled()) workingMemory.record(key, { ...entry, id: `sent:${crypto.randomUUID()}`, time: entry.at, plain: display });
     st.recentMessages.push(entry);
@@ -3691,7 +3694,7 @@ async function main() {
             && obj.key && canonicalV2Key(obj.key) === requestKey()
             && ['/api/socialV2/unread', '/api/socialV2/recent', '/api/socialV2/wait', '/api/socialV2/working-memory'].includes(url.pathname)
             && (req.method === 'GET' || url.pathname === '/api/socialV2/wait')) {
-          obj = { ...obj, role: currentRoleContextV2(), participation: participationContext(obj.key) };
+          obj = { ...obj, role: currentRoleContextV2(), participation: participation.context(obj.key) };
         }
         res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
         res.end(JSON.stringify(obj, null, 2));
@@ -4069,7 +4072,7 @@ async function main() {
         // 管理端专用 v2 接口：带 agent token 的请求一律拒绝，防止 MCP 工具越权访问控制台功能
         // /api/socialV2/initial-prompt 也在这里：它是操作者写给 AI 的"环境背景"，
         // 让 AI 自己读/改等于把控制台的管理输入（以及未来可能写入的其它群信息）交给会话主体。
-        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt'];
+        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/participation', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt'];
         if (req.headers['x-agent-token'] && (adminOnlyV2Paths.includes(url.pathname) || (url.pathname === '/api/socialV2/feedback' && req.method === 'GET') || (url.pathname === '/api/socialV2/tool-log' && req.method === 'GET'))) {
           sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
           return;
@@ -5134,6 +5137,33 @@ async function main() {
           return;
         }
         // ── 二代仿真模式（reserved2）内部 Agent API ─────────────────────────
+        if (url.pathname === '/api/socialV2/participation') {
+          if (!tokenMatches || req.headers['x-agent-token'] !== undefined || req.headers['x-agent-call'] !== undefined || req.headers['x-debate-token'] !== undefined) throw frameworkError('接话管理仅供控制台使用', 403);
+          if (!['GET', 'POST'].includes(req.method)) throw frameworkError('不支持的接话管理操作', 405);
+          const body = req.method === 'POST' ? await readBody() : {};
+          if (Object.keys(body).some(k => !['key', 'policy', 'inherit'].includes(k))) throw frameworkError('接话管理参数无效');
+          const key = String(body.key ?? url.searchParams.get('key') ?? '');
+          if (key && (!/^group:[1-9]\d{0,15}$/.test(key) || canonicalV2Key(key) !== key)) throw frameworkError('请输入有效的group:群号');
+          const config = normalizeParticipationConfig(cfg.socialV2.participation);
+          if (req.method === 'POST') {
+            if (body.inherit !== undefined && typeof body.inherit !== 'boolean') throw frameworkError('inherit必须为布尔值');
+            if (body.inherit === true) {
+              if (!key || body.policy !== undefined) throw frameworkError('恢复继承需要群号且不能同时指定policy');
+              delete config.groups[key];
+            } else {
+              if (!body.policy || typeof body.policy !== 'object' || Array.isArray(body.policy)) throw frameworkError('需要policy对象');
+              if (key) { normalizeParticipationPolicy(body.policy, config.defaults); config.groups[key] = { ...body.policy }; }
+              else config.defaults = normalizeParticipationPolicy(body.policy, config.defaults);
+            }
+            const validated = normalizeParticipationConfig(config), configFile = path.join(ROOT, 'config.json'), file = readConfigObject(configFile);
+            file.socialV2 = { ...(file.socialV2 ?? {}), participation: validated };
+            atomicWriteJson(configFile, file); cfg.socialV2.participation = validated;
+          }
+          const current = normalizeParticipationConfig(cfg.socialV2.participation);
+          sendJson({ ok: true, key, defaults: current.defaults, override: key ? current.groups[key] ?? null : null,
+            policy: key ? participation.policy(key) : current.defaults,
+            status: key && socialV2.conversations.has(key) ? participation.context(key, { history: true }) : null }); return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/config') {
           sendJson({ ok: true, config: cfg.socialV2 ?? {} });
           return;
@@ -5156,6 +5186,7 @@ async function main() {
             : null;
           const current = fileV2 ?? ((cfg.socialV2 && typeof cfg.socialV2 === 'object') ? cfg.socialV2 : {});
           const merged = { ...current, ...body };
+          if (body.participation !== undefined) merged.participation = normalizeParticipationConfig(body.participation);
           // 子对象必须是非 null 对象；null/数组/基本类型会覆盖默认值导致工具开关被绕过，这里直接保留当前值。
           for (const sub of ['tools', 'wake', 'send', 'wait', 'proactive', 'sticker', 'feedback', 'context', 'workingMemory']) {
             if (body[sub] !== undefined && (body[sub] === null || typeof body[sub] !== 'object' || Array.isArray(body[sub]))) {
@@ -5448,6 +5479,7 @@ async function main() {
             const snapshot = workingMemory.snapshot(key, { query: url.searchParams.get('query') || '', messageId: url.searchParams.get('messageId') || '' });
             if (req.headers['x-agent-token']) {
               workingMemory.offered(key, snapshot);
+              participation.presented(key, snapshot.messages);
               const st = getSocialV2State(key);
               snapshot.readThroughSeq = noteModelMessagesV2(st, snapshot.messages.filter(m => st.unread.some(n => n.seq === m.seq && n.time === m.time)));
             }
@@ -5457,6 +5489,12 @@ async function main() {
           const { key: ignoredKey, ...input } = body;
           const discarded = workingMemory.get(key).messages.filter(m => Array.isArray(input.discardMessageIds) && input.discardMessageIds.includes(m.id));
           const result = workingMemory.update(key, input);
+          if (discarded.length) participation.discarded(key, discarded.map(m => m.id));
+          if (input.decision && workingMemory.get(key).decision) {
+            const memory = workingMemory.get(key);
+            participation.decided(key, memory.decision, memory.messages.filter(m => memory.decision?.sources.includes(m.id)));
+            saveSocialV2State();
+          }
           if (discarded.length) {
             const st = getSocialV2State(key);
             const matches = m => discarded.some(d => (d.messageId && String(m.messageId) === d.messageId) || (d.seq != null && m.seq === d.seq && m.time === d.time));
@@ -5622,7 +5660,7 @@ async function main() {
             memory: null,
             memoryProvider: cfg.memory?.provider ?? null,
             participation: formatParticipationV2(st, key),
-            participationPolicy: participationContext(key),
+            participationPolicy: participation.context(key),
             slang: {
               enabled: cfg.slang?.enabled !== false,
               entries: cfg.socialV2?.context?.strategy === 'inline' ? confirmedSlangListV2() : [],
@@ -6086,7 +6124,7 @@ async function main() {
             }
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             saveSocialV2State();
-            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+            sendJson({ ok: false, error: error?.message ?? String(error), sent: sentCount, failed: failedCount }, error?.statusCode || 500);
           }
           return;
         }
@@ -6231,7 +6269,7 @@ async function main() {
             }
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             saveSocialV2State();
-            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+            sendJson({ ok: false, error: error?.message ?? String(error), sent: sentCount, failed: failedCount }, error?.statusCode || 500);
           }
           return;
         }
@@ -6535,7 +6573,7 @@ async function main() {
               loudness: sent.loudness
             });
           } catch (error) {
-            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+            sendJson({ ok: false, error: error?.message ?? String(error) }, error?.statusCode || 500);
           }
           return;
         }
@@ -6601,7 +6639,7 @@ async function main() {
             });
           } catch (error) {
             // 额度只在真正发出后才记账（voiceBudgetCommit），所以失败路径无需回滚。
-            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+            sendJson({ ok: false, error: error?.message ?? String(error) }, error?.statusCode || 500);
           }
           return;
         }
@@ -6666,6 +6704,7 @@ async function main() {
               atUserId
             });
             // 记录到二代会话的 recentMessages，让 AI 知道自己发过这个表情
+            participation.sent(key, 1);
             const label = sent.entry?.desc || sent.entry?.localNote || '表情包';
             const text = `[表情包:${label}]`;
             st.recentMessages.push({
@@ -7711,7 +7750,7 @@ async function main() {
             }
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             saveSocialV2State();
-            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+            sendJson({ ok: false, error: error?.message ?? String(error), sent: sentCount, failed: failedCount }, error?.statusCode || 500);
           }
           return;
         }
@@ -8682,6 +8721,7 @@ async function main() {
     const ordinaryAgent = requestContext.getStore()?.agent === true && requestContext.getStore()?.origin !== 'debate';
     return () => {
       assertRequestLive?.();
+      if (ordinaryAgent && modeFor(key) === 'reserved2') participation.assertSend(key);
       if (ordinaryAgent && modeFor(key) === 'reserved2' && workingEnabled()) {
         const latest = [...workingMemory.get(key).messages].reverse().find(m => {
           const task = debateTasks.tasks.get(m.debateTaskId);
@@ -9069,6 +9109,7 @@ async function main() {
     let st = socialV2.conversations.get(key);
     if (!st) {
       st = {
+        key,
         wakeConfig: defaultWakeConfigV2(),
         recentMessages: [],
         unread: [],
@@ -9140,6 +9181,8 @@ async function main() {
           }
           seenTokens.add(agentToken);
           const st = {
+            key,
+            participation: normalizeParticipationState(val.participation),
             wakeConfig: {
               ...defaultWc,
               ...(val.wakeConfig ?? {}),
@@ -9229,6 +9272,7 @@ async function main() {
       for (const [key, st] of socialV2.conversations) {
         obj.conversations[key] = {
           wakeConfig: st.wakeConfig,
+          participation: normalizeParticipationState(st.participation),
           recentMessages: st.recentMessages.slice(-200),
           unread: st.unread.slice(-100),
           lastWakeReason: st.lastWakeReason,
@@ -9399,40 +9443,7 @@ async function main() {
   }
 
   function formatParticipationV2(st, key) {
-    if (!st) return '';
-    if (String(key).startsWith('private:')) return '【参与度参考】这是私聊，结合对方当前发言判断回应；引用或转发中的对象仍需区分。';
-    const now = Date.now();
-    const hour = 60 * 60 * 1000;
-    const fiveMin = 5 * 60 * 1000;
-    const recent = Array.isArray(st.recentMessages) ? st.recentMessages : [];
-    const aiCount = recent.filter((m) => m && m.isSelf && now - (Number(m.time) || 0) < hour).length;
-    const otherCount = recent.filter((m) => m && !m.isSelf && now - (Number(m.time) || 0) < hour).length;
-    if (!aiCount && !otherCount) return '';
-    const fiveMinOthers = recent.filter((m) => m && !m.isSelf && now - (Number(m.time) || 0) < fiveMin);
-    const activeSenders = new Set(fiveMinOthers.map((m) => m && (m.sender || m.user_id || '?'))).size;
-    const directUnread = Array.isArray(st.unread) ? st.unread.filter((m) => m && (m.addressing?.mentionsSelf || m.addressing?.replyTarget === 'self' || m.quoteTargetIsSelf)).length : 0;
-    const lastAiGap = now - (Number(st.lastAiReplyAt) || 0);
-    const recentAi2m = recent.filter((m) => m && m.isSelf && now - (Number(m.time) || 0) < 2 * 60 * 1000).length;
-    let hint = '';
-    if (directUnread > 0) {
-      hint = '有明确@或引用你的消息，优先检查其语境；其他群消息仍按对象与参与价值判断。';
-    } else if (recentAi2m >= 2) {
-      hint = '你刚刚已经连回多次，先听别人说；除非明确接着与你交流或有必要补充，否则继续观察。';
-    } else if (lastAiGap < 120000) {
-      hint = '你刚说过话，后续新消息不一定在回应你；先辨认对象，不连续补话。';
-    } else if (aiCount >= 5) {
-      hint = '你最近发言偏多，没有明确关联时优先观察，给其他群友留下交流空间。';
-    } else if (fiveMinOthers.length >= 10 || (fiveMinOthers.length >= 6 && activeSenders >= 3)) {
-      hint = `群聊正热（近5分钟${fiveMinOthers.length}条${activeSenders ? `/${activeSenders}人` : ''}在聊），先辨认交流对象；热闹不是插话理由，明确对他人说的话默认观察。`;
-    } else if (otherCount >= 10 && aiCount === 0) {
-      hint = '群聊热闹但没有明确叫你，继续观察很正常；只在开放话题里有具体补充时少量参与。';
-    } else if (otherCount < 3 && aiCount > 0) {
-      hint = '群聊有点冷，无人接话就允许结束，不需要一个人撑场。';
-    } else if (aiCount <= 1 && otherCount >= 10) {
-      hint = '没有明确交流关联就继续观察，不因之前发言少而补足参与次数。';
-    }
-    const burstText = fiveMinOthers.length ? `；近5分钟群聊 ${fiveMinOthers.length} 条${activeSenders ? `/${activeSenders}人` : ''}` : '';
-    return `【参与度参考】你最近 1 小时发言 ${aiCount} 次，群友发言 ${otherCount} 条${burstText}。${hint}`;
+    return st ? participation.context(key).summary : '';
   }
 
   function suggestQuietMsV2(st) {
@@ -9759,7 +9770,7 @@ async function main() {
       if (modeFor(key) === 'reserved2') {
         result += '\n\n【当前有效角色卡：管理员配置，持续提供】\n' + JSON.stringify(currentRoleContextV2())
           + '\n以本轮角色卡的身份、态度、关系边界和说话习惯回应当前对话，不复述角色卡；语气随实际情境自然变化。历史摘要、工作记忆和工具处理过程不能替代人设。name=null表示管理员未启用自定义角色，不沿用历史已取消的人设。安全权限与工具协议仍优先。';
-        result += '\n\n' + participationContext(key).guidance;
+        result += '\n\n' + participation.context(key).guidance;
       }
       return result;
     };
@@ -9791,6 +9802,7 @@ async function main() {
     }
     if (workingPacket && isCurrentSession(key, sessionId) && wakeState.agentToken === wakeToken) {
       workingMemory.offered(key, workingPacket, observation.sources);
+      participation.presented(key, workingPacket.messages);
       noteModelMessagesV2(wakeState, workingPacket.messages.filter(m => wakeState.unread.some(n => n.seq === m.seq && n.time === m.time)));
       for (const job of observation.jobs || []) { job.delivered = true; job.parts = []; if (!job.quotaBlocked) workingMemory.media(key, job.sourceId, { offeredAt: Date.now() }); }
     }
@@ -10541,6 +10553,7 @@ async function main() {
     const now = Date.now();
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const list = Array.isArray(messages) ? messages : [];
+    if (origin === 'chat') participation.sent(key, list.length);
     for (let i = 0; i < list.length; i++) {
       const text = redactKnownTokensOnly(String(list[i] ?? '')).slice(0, 200);
       if (workingEnabled()) workingMemory.record(key, { id: `sent:${crypto.randomUUID()}`, sender: '我', isSelf: true, origin, debateTaskId,
@@ -10724,6 +10737,7 @@ async function main() {
   }
 
   function noteModelMessagesV2(st, messages) {
+    if (st.key) participation.presented(st.key, messages);
     // Bound receipts by the actual unread buffer; historical/self messages need no receipt.
     const unread = new Set(st.unread.map((m) => m.seq));
     st.modelSeenSeqs = new Set([...st.modelSeenSeqs || []].filter((seq) => unread.has(seq)));
@@ -10852,7 +10866,6 @@ async function main() {
       ? `${buildStickerStrategyHint()}\n${buildStickerContext(stickerEntries, stickerCfg.promptMaxStickers ?? 8)}\n\n`
       : '';
     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
-    const proactiveLine = '【参与判断】群消息默认先观察对象与关系。明确对你说话或开放话题里确有具体补充时才考虑发言；不把别人的互聊、提到你或普通问号当成专属呼叫。\n\n';
     const replyTiming = replyTimingV2(st);
     const replyLine = `【首回复节奏】先处理已有消息，完整的问题及时回答。需要确认对方是否继续补充时，用 qq_wait_for_messages(purpose="reply", quietMs=${replyTiming.quietMs})；从最后来信计时，合批和读提示词的耗时也算，目前还差约 ${Math.ceil(replyTiming.remainingQuietMs / 1000)} 秒静默。已安静够久可直接回，工具也会立即返回并补上思考期间的新消息。只有明确没说完、你确实要等下文时，才用普通 messages 长等待。\n\n`;
     const preSleepLine = `【沉睡前强制等待】这是决定潜水收尾时的步骤，不是首回复的前置条件。除非对方明确说“不聊了/晚安/下了/拜拜”等结束语，否则每次设置潜水/下一次唤醒前，必须先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成一次沉睡前观察；回复前 purpose="reply" 的短静默不能代替这次完整观察。若 ${Math.round(preSleepMs / 60000)} 分钟内没人说话，返回 preSleepWaitSatisfied=true，可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看返回的 newMessages——判断不需要你参与就可以直接沉睡，若你选择参与回复，则下次想睡时需要重新等待观察窗口。如果返回里带 preSleepWaitRemainingMs，就按剩余时间继续等待。\n\n`;
@@ -10882,7 +10895,7 @@ async function main() {
     // 后续唤醒不再带它 —— 那时它已经在这条 DSH 会话的上下文里了。
     const initialPromptText = reason === 'bootstrap' ? formatInitialPromptV2(key) : '';
     const initialPromptLine = initialPromptText ? `${initialPromptText}\n\n` : '';
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + preSleepLine;
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }

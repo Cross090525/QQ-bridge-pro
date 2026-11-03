@@ -32,6 +32,8 @@ export class QQBridgeClient {
     if (!response.ok || result.ok === false) {
       const error = new Error(result.error || `QQ bridge HTTP ${response.status}`);
       error.statusCode = response.status;
+      if (Number.isSafeInteger(result.sent)) error.sent = result.sent;
+      if (Number.isSafeInteger(result.failed)) error.failed = result.failed;
       throw error;
     }
     return result;
