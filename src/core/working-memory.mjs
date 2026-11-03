@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { normalizeAddressing } from './participation.mjs';
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
 const copy = value => structuredClone(value);
 const str = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
@@ -40,11 +41,13 @@ export class WorkingMemory {
   record(key, message) {
     const state = copy(this.get(key));
     if (state.messages.some(m => m.id === message.id)) return;
+    const addressing = normalizeAddressing(message.addressing);
     state.messages.push({ id: String(message.id), seq: message.seq ?? null, messageId: str(message.messageId, 100),
       sender: str(message.sender, 100), userId: str(message.userId, 30), isSelf: message.isSelf === true, origin: message.origin === 'debate' ? 'debate' : 'chat',
       debateTaskId: /^[a-f0-9]{32}$/.test(message.debateTaskId || '') ? message.debateTaskId : '',
       text: str(message.plain ?? message.text, 12000), textTruncated: String(message.plain ?? message.text ?? '').length > 12000,
       replyToMessageId: str(message.replyToMessageId, 100),
+      ...(addressing ? { addressing } : {}),
       quoteTargetIsSelf: message.quoteTargetIsSelf === true, time: Number(message.time) || this.now(),
       media: (message.content || []).filter(c => c.sourceId).slice(0, 20).map(c => ({ sourceId: c.sourceId, type: c.type })) });
     state.messages = state.messages.slice(-this.maxMessages);
