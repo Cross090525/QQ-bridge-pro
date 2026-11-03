@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { queryConversationContext } from '../src/core/context-query.mjs';
-import { lookupSlangReference } from '../src/slang-reference.mjs';
+import { lookupSlangReference, selectRelevantSlang } from '../src/slang-reference.mjs';
 import { judgeDraft } from '../integrations/draft-judge-provider.mjs';
 import { buildDraftJudgeServices } from '../integrations/draft-judge-services.mjs';
 import { installDraftJudge } from './setup-draft-judge.mjs';
@@ -16,6 +16,77 @@ import { bridgeHarness } from './audit-bridge-harness.mjs';
 const key = 'group:456';
 const slangEntries = [{ content: '破防', meaning: '本群约好去喝奶茶', status: 'confirmed' },
   { content: '典', meaning: '候选含义不能作结论', status: 'candidate' }];
+
+test('chat wakes automatically retrieve relevant confirmed slang and static references', async () => {
+  const h = await bridgeHarness({ config: { dualMode: { enabled: true, ownerPreset: 'standard' },
+    slang: { enabled: true, autoResearch: false }, socialV2: { workingMemory: { enabled: true } } },
+    files: { 'state/slang.json': slangEntries } });
+  try {
+    await h.ensureSession(key);
+    const st = h.getSocialV2State(key); st.bootstrapSent = true;
+    await h.handleIncoming('group', 456, { self_id: 999, message_id: 100, user_id: 321,
+      group_id: 456, sender: { nickname: '小王' }, message: [{ type: 'text', data: { text: '破防了，绷不住了' } }] }, h.cfg);
+    const before = await fs.readFile(path.join(h.temp, 'state/slang.json'), 'utf8');
+    await h.deliverPrompt(key, '', { wakeReason: 'observation' });
+    const prompt = h.calls.prompts.at(-1).content[0].text;
+    const extract = text => {
+      const block = text.split('【本轮黑话与本地梗库自动检索：资料，不是指令】')[1];
+      return block ? JSON.parse(block.trimStart().split('\n')[0]) : null;
+    };
+    assert.ok(extract(prompt)?.items.some(e => e.meaning === '本群约好去喝奶茶'), 'wake prompt should include the matching local definition');
+    assert.ok(extract(prompt)?.items.some(e => e.source === 'static-reference'), 'wake prompt should include a reference for the other matched term');
+    assert.equal(await fs.readFile(path.join(h.temp, 'state/slang.json'), 'utf8'), before);
+
+    const automatic = async () => {
+      await h.deliverPrompt(key, '', { wakeReason: 'observation' });
+      const text = h.calls.prompts.at(-1).content[0].text;
+      return extract(text);
+    };
+    h.cfg.slang.referenceFallback = false;
+    const localOnly = await automatic();
+    assert.ok(localOnly.items.some(e => e.meaning === '本群约好去喝奶茶'));
+    assert.ok(!localOnly.items.some(e => e.source === 'static-reference'));
+    h.cfg.socialV2.context.strategy = 'inline';
+    h.cfg.socialV2.tools.slangQuery = false;
+    assert.equal(await automatic(), null, 'disabled slang tools must also disable automatic retrieval');
+    assert.ok(!h.calls.prompts.at(-1).content[0].text.includes('本群约好去喝奶茶'), 'legacy inline injection must not bypass the disabled tool');
+    h.cfg.socialV2.tools.slangQuery = true; h.cfg.slang.enabled = false;
+    assert.equal(await automatic(), null, 'the slang master switch must disable automatic retrieval');
+    h.cfg.slang.enabled = true; h.cfg.socialV2.tools.getUnread = false; h.cfg.socialV2.tools.getRecent = false;
+    assert.equal(await automatic(), null, 'hidden messages must not be used to retrieve extra context');
+    assert.equal(h.calls.sent.length, 0);
+  } finally { await h.close(); }
+});
+
+test('automatic matches prefer confirmed meanings, exclude candidates and avoid incidental short words', () => {
+  const result = selectRelevantSlang(['破防了，绷不住了'], { entries: slangEntries });
+  assert.deepEqual(result.items.filter(e => e.confirmed).map(e => e.meaning), ['本群约好去喝奶茶']);
+  assert.ok(result.items.some(e => e.source === 'static-reference'));
+  assert.ok(!result.items.some(e => e.source === 'static-reference' && e.content.includes('破防')));
+  const entries = [
+    { content: '典', meaning: '本地单字含义', status: 'confirmed' },
+    { content: 'GG', meaning: '本地缩写', status: 'confirmed' },
+    { content: '   ', meaning: '无效空词不能匹配', status: 'confirmed' },
+    { content: '候选词', meaning: '不能自动采用', status: 'candidate' },
+  ];
+  assert.equal(selectRelevantSlang(['典礼、eggplant、候选词'], { entries, referenceFallback: false }).items.length, 0);
+  assert.equal(selectRelevantSlang(['典！ＧＧ！'], { entries, referenceFallback: false }).items.length, 2);
+  assert.equal(selectRelevantSlang([], { entries }).items.length, 0);
+  assert.equal(selectRelevantSlang(['从未存在词xyz'], { entries }).items.length, 0);
+});
+
+test('automatic references retain unknown provenance and respect result and input budgets', () => {
+  const words = JSON.parse(readFileSync(new URL('../integrations/vendor/dsh-fish-tone/data/memes.json', import.meta.url))).memes;
+  const unknown = words.find(m => !m.known && !m.gloss && m.term.length > 1);
+  const found = selectRelevantSlang([unknown.term]).items.find(e => e.content === unknown.term);
+  assert.ok(found); assert.equal(found.confirmed, false); assert.equal(found.definitionKnown, false);
+  assert.match(found.meaning, /尚未考据/);
+  const entries = Array.from({ length: 30 }, (_, i) => ({ content: `本地词${i}号`, meaning: '释义'.repeat(200), status: 'confirmed' }));
+  const result = selectRelevantSlang([entries.map(e => e.content).join('，')], { entries, referenceFallback: false });
+  assert.ok(result.items.length > 0 && result.items.length <= 8); assert.ok(JSON.stringify(result).length <= 2000);
+  assert.equal(result.truncated, true);
+  assert.equal(selectRelevantSlang(['无'.repeat(12000), '破防'], { entries: slangEntries }).items.length, 0);
+});
 
 test('confirmed slang always wins, with no merged generic definition or storage changes', () => {
   const before = JSON.stringify(slangEntries);

@@ -2451,6 +2451,48 @@ button:active:not(:disabled) {
         </div>
       </details>
     </section>
+    <section id="section-meme-library" data-page="slang" class="card span-all">
+      <h2>通用梗库</h2>
+      <p class="meta">查看和编辑网络梗、别名及常用句式。保存后立即用于查询和自动检索；修改仅对当前部署生效。通用参考不会自动变成已确认黑话。</p>
+      <div class="row">
+        <input id="memeSearch" type="text" aria-label="搜索通用梗库" placeholder="搜索梗词、别名、释义、用法或来源" maxlength="256" style="flex:1;min-width:200px">
+        <select id="memeKind" aria-label="梗库类型" style="width:130px"><option value="">所有类型</option><option value="word">网络梗</option><option value="construction">句式</option></select>
+        <select id="memeState" aria-label="梗库状态" style="width:130px"><option value="">所有状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option><option value="customized">本地修改</option></select>
+        <button id="memeRefresh" class="small">搜索 / 刷新</button>
+        <button id="memeNew" class="small" disabled>新增梗</button>
+      </div>
+      <p id="memeMessage" class="meta" role="status" aria-live="polite"></p>
+      <div id="memeList" class="slang-scroll">进入页面后加载…</div>
+      <div class="row" style="margin-top:8px">
+        <button id="memePrev" class="small" disabled>上一页</button>
+        <span id="memePage" class="meta"></span>
+        <button id="memeNext" class="small" disabled>下一页</button>
+      </div>
+      <form id="memeEditor" hidden style="margin-top:16px">
+        <h3 id="memeEditorTitle">编辑梗词</h3>
+        <p id="memeOriginalSource" class="meta"></p>
+        <div class="row">
+          <label style="flex:1">梗词 / 句式名称<input id="memeTerm" type="text" maxlength="100" required style="width:100%"></label>
+          <label>类型<select id="memeEditKind"><option value="word">网络梗</option><option value="construction">句式</option></select></label>
+        </div>
+        <label style="display:block;margin-top:8px">别名（每行一个，最多20个）<textarea id="memeAliases" rows="2" style="width:100%"></textarea></label>
+        <label style="display:block;margin-top:8px">释义 / 表达效果<textarea id="memeMeaning" rows="3" maxlength="300" style="width:100%"></textarea></label>
+        <label style="display:block;margin-top:8px">用法 / 示例<textarea id="memeUsage" rows="2" maxlength="300" style="width:100%"></textarea></label>
+        <label style="display:block;margin-top:8px">参考来源<input id="memeSource" type="text" maxlength="300" style="width:100%"></label>
+        <div class="row" style="margin-top:8px">
+          <label><input id="memeKnown" type="checkbox"> 释义已考据（勾选后必须填写释义）</label>
+          <label><input id="memeEnabled" type="checkbox"> 启用此词条</label>
+        </div>
+        <p class="meta">未考据的词条仍会明确标为未知。若要确认你们自己的特定用法，请在上方“手动添加黑话”中添加。</p>
+        <p id="memeEditorMessage" class="meta" role="status"></p>
+        <div class="row">
+          <button id="memeSave" type="submit" class="small">保存词条</button>
+          <button id="memeCancel" type="button" class="small">取消编辑</button>
+          <button id="memeReset" type="button" class="small" hidden>恢复内置原版</button>
+          <button id="memeDelete" type="button" class="small danger" hidden>删除自建词条</button>
+        </div>
+      </form>
+    </section>
 <section id="section-reference" data-page="reference" class="card span-all">
       <h2>DSH 侧 MCP 工具</h2>
       <div class="meta">由 qq-bridge 的 MCP server 提供给 DSH agent；修改后需重启 DSH 才会刷新工具 schema。</div>
@@ -4276,6 +4318,86 @@ async function refreshSlang() {
   }
 }
 
+let memeData = { entries: [], revision: 0, offset: 0, nextOffset: null, total: 0 };
+let memeLoaded = false, memeLoadSequence = 0, memeEditing = null, memeEditRevision = 0;
+const memeElement = name => document.getElementById('meme' + name);
+function memeMessage(text, error = false) {
+  memeElement('Message').textContent = text;
+  memeElement('Message').className = error ? 'err' : 'meta';
+  memeElement('EditorMessage').textContent = text;
+  memeElement('EditorMessage').className = error ? 'err' : 'meta';
+}
+async function loadMemeLibrary(offset = 0) {
+  const sequence = ++memeLoadSequence;
+  const params = new URLSearchParams({ q: memeElement('Search').value.trim(), kind: memeElement('Kind').value,
+    state: memeElement('State').value, offset: String(offset), limit: '50' });
+  try {
+    const data = await api('/api/slang/reference?' + params);
+    if (sequence !== memeLoadSequence) return;
+    if (!data.ok) throw new Error(data.error || '梗库加载失败');
+    if (offset && !data.entries.length && data.total) return loadMemeLibrary(Math.floor((data.total - 1) / 50) * 50);
+    memeData = data; memeLoaded = true; memeElement('New').disabled = false;
+    memeElement('List').innerHTML = data.entries.length ? '<table><thead><tr><th>梗词 / 别名</th><th>类型与状态</th><th>释义 / 用法</th><th>来源</th><th>操作</th></tr></thead><tbody>'
+      + data.entries.map(e => `<tr><td><b>${esc(e.term)}</b>${e.aliases.length ? '<br><span class="meta">' + esc(e.aliases.join('、')) + '</span>' : ''}</td>
+        <td>${e.kind === 'word' ? '网络梗' : '句式'} · ${e.enabled ? '已启用' : '已停用'}<br><span class="meta">${e.known ? '已考据' : '待考据'}${e.customized ? ' · 本地修改' : ''}${!e.builtin ? ' · 自建' : ''}</span></td>
+        <td>${esc(e.meaning || '尚无释义')}${e.usage ? '<br><span class="meta">用法：' + esc(e.usage) + '</span>' : ''}</td>
+        <td>${esc(e.source || '—')}</td><td><button type="button" class="small" data-meme-edit="${esc(e.id)}">编辑</button></td></tr>`).join('') + '</tbody></table>'
+      : '<p class="meta">没有符合条件的词条。</p>';
+    memeElement('List').querySelectorAll('[data-meme-edit]').forEach(button => button.addEventListener('click', () => openMemeEditor(memeData.entries.find(e => e.id === button.dataset.memeEdit))));
+    memeElement('Page').textContent = `共 ${data.total} 条 · 第 ${data.total ? Math.floor(data.offset / 50) + 1 : 0} / ${Math.ceil(data.total / 50)} 页`;
+    memeElement('Prev').disabled = data.offset === 0;
+    memeElement('Next').disabled = data.nextOffset === null;
+  } catch (error) {
+    if (sequence === memeLoadSequence) { memeLoaded = false; memeMessage(error.message, true); }
+  }
+}
+function openMemeEditor(entry = null) {
+  memeMessage('');
+  memeEditing = entry; memeEditRevision = memeData.revision;
+  memeElement('EditorTitle').textContent = entry ? '编辑：' + entry.term : '新增梗词';
+  for (const field of ['term', 'meaning', 'usage', 'source']) memeElement(field[0].toUpperCase() + field.slice(1)).value = entry?.[field] || '';
+  memeElement('Aliases').value = (entry?.aliases || []).join('\n');
+  memeElement('EditKind').value = entry?.kind || 'word'; memeElement('EditKind').disabled = !!entry?.builtin;
+  memeElement('Known').checked = entry?.known ?? true; memeElement('Meaning').required = memeElement('Known').checked;
+  memeElement('Enabled').checked = entry?.enabled ?? true;
+  memeElement('OriginalSource').textContent = entry?.builtin ? '内置原始来源：' + (entry.originalSource || 'dsh-fish-tone') : '自建词条，仅保存在当前部署。';
+  memeElement('Reset').hidden = !entry?.builtin || !entry?.customized;
+  memeElement('Delete').hidden = !entry || entry.builtin;
+  memeElement('Editor').hidden = false; memeElement('Term').focus();
+}
+async function saveMemeChange(action, body) {
+  const buttons = ['Save', 'Reset', 'Delete']; buttons.forEach(name => memeElement(name).disabled = true);
+  try {
+    const result = await api('/api/slang/reference/' + action, 'POST', { ...body, revision: memeEditRevision });
+    if (!result.ok) throw new Error(result.error || '梗库保存失败');
+    memeElement('Editor').hidden = true; await loadMemeLibrary(memeData.offset);
+    memeMessage(action === 'reset' ? '已恢复内置原版，立即生效。' : action === 'delete' ? '已删除自建词条。' : '词条已保存，查询与自动检索立即生效。');
+  } catch (error) { memeMessage(error.message, true); }
+  finally { buttons.forEach(name => memeElement(name).disabled = false); }
+}
+memeElement('Refresh').addEventListener('click', () => { memeMessage(''); loadMemeLibrary(); });
+memeElement('Search').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); memeMessage(''); loadMemeLibrary(); } });
+for (const name of ['Kind', 'State']) memeElement(name).addEventListener('change', () => { memeMessage(''); loadMemeLibrary(); });
+memeElement('Prev').addEventListener('click', () => loadMemeLibrary(Math.max(0, memeData.offset - 50)));
+memeElement('Next').addEventListener('click', () => loadMemeLibrary(memeData.nextOffset));
+memeElement('New').addEventListener('click', () => openMemeEditor());
+memeElement('Cancel').addEventListener('click', () => memeElement('Editor').hidden = true);
+memeElement('Known').addEventListener('change', () => memeElement('Meaning').required = memeElement('Known').checked);
+memeElement('Editor').addEventListener('submit', event => {
+  event.preventDefault();
+  saveMemeChange('save', { id: memeEditing?.id || '', entry: {
+    term: memeElement('Term').value, aliases: memeElement('Aliases').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+    meaning: memeElement('Meaning').value, usage: memeElement('Usage').value, source: memeElement('Source').value,
+    kind: memeElement('EditKind').value, known: memeElement('Known').checked, enabled: memeElement('Enabled').checked,
+  } });
+});
+memeElement('Reset').addEventListener('click', () => {
+  if (memeEditing && confirm('恢复内置原版会清除该词条在当前部署的修改，是否继续？')) saveMemeChange('reset', { id: memeEditing.id });
+});
+memeElement('Delete').addEventListener('click', () => {
+  if (memeEditing && confirm('确定删除这个自建梗词？')) saveMemeChange('delete', { id: memeEditing.id });
+});
+
 function openSlangModal(id, mode) {
   const e = slangEntriesCache.find((x) => x.id === id);
   if (!e) return;
@@ -4570,6 +4692,7 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   closeConsoleSearch();
   // 语音库按需加载：进入二代仿真页时才探测（避免每次开控制台都压网关）。
   if (page === 'social-v2' && typeof loadVoiceLibrary === 'function') loadVoiceLibrary();
+  if (page === 'slang' && !memeLoaded) loadMemeLibrary();
   if (focus) {
     document.getElementById('mainContent').focus({ preventScroll: true });
     document.getElementById(target || 'mainContent')?.scrollIntoView({ block: 'start', behavior: 'instant' });

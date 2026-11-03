@@ -24,6 +24,8 @@ import * as roleCard from '../src/role-card.js';
 import * as stateAcl from '../src/state-acl.mjs';
 import * as dualMode from '../src/core/dual-mode.mjs';
 import * as contextQuery from '../src/core/context-query.mjs';
+import { selectRelevantSlang } from '../src/slang-reference.mjs';
+import { SlangReferenceStore } from '../src/core/slang-reference-store.mjs';
 import { WorkingMemory, ObservationQueue, observationServices } from '../src/core/working-memory.mjs';
 import * as publicApi from '../src/core/public-api.mjs';
 import * as frameworkContent from '../src/framework/content.mjs';
@@ -186,7 +188,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
-    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...dualMode, ...contextQuery, ...publicApi, WorkingMemory, ObservationQueue, observationServices,
+    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...dualMode, ...contextQuery, selectRelevantSlang, SlangReferenceStore, ...publicApi, WorkingMemory, ObservationQueue, observationServices,
     ...frameworkContent, FrameworkMediaStore, ContentServiceRuntime, ...extensionPermissionsModule, MemoryProviderRuntime, ...memoryCompat, DebateTasks, handleDebateApi, projectDebateContext,
     DebateRequests, normalizeDebateWake, ManagedDebateWorkers, spawn: () => { throw Error('fixture forbids real worker spawning'); },
     DshDebateAnalyzer, UsageQuotas: class extends UsageQuotas { constructor(options) { super({ ...options, waitMs: 0 }); } }, normalizeQuotaConfig, QUOTA_RESOURCES,

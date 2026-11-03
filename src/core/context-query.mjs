@@ -89,7 +89,7 @@ export function queryConversationContext(source, input = {}, now = Date.now()) {
     .sort((a, b) => b.relevance - a.relevance || (Number(b.item.updatedAt) || 0) - (Number(a.item.updatedAt) || 0) || a.index - b.index)
     .map(entry => entry.item);
   if (kind === 'slang' && !items.length && query && source.slangReferenceFallback === true) {
-    const references = lookupSlangReference(query);
+    const references = source.slangReferenceLookup ? source.slangReferenceLookup(query) : lookupSlangReference(query);
     return pack(kind, references, options, { provenance: 'static-reference',
       note: '已确认黑话未命中；以下仅为通用词典参考，未经本群确认，不能覆盖本群用法或自动写入黑话库。' });
   }
