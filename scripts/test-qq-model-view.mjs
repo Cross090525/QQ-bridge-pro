@@ -155,6 +155,8 @@ test('MCP validates/forwards read watermarks and wait purposes against an isolat
     await fs.mkdir(path.join(fixture, 'src'));
     await Promise.all(['mcp-snowluma-safe.js', 'qq-model-view.js', 'sensitive.js'].map((name) =>
       fs.copyFile(path.join(ROOT, 'src', name), path.join(fixture, 'src', name))));
+    await fs.mkdir(path.join(fixture, 'src', 'core'));
+    await fs.copyFile(path.join(ROOT, 'src', 'core', 'time-reference.mjs'), path.join(fixture, 'src', 'core', 'time-reference.mjs'));
     await fs.writeFile(path.join(fixture, 'config.json'), JSON.stringify({ consolePort: api.address().port }));
     const transport = new StdioClientTransport({
       command: process.execPath,

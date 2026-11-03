@@ -49,7 +49,7 @@ async function fixture(run, override = {}) {
   finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await h.close(); await plugin.close(); }
 }
 
-test('default wakes contain no inline memory, slang, message history or role body; inline is an explicit fallback', () => fixture(async ({ h, st }) => {
+test('wakes retain the role and supplied messages without exporting unrelated slang or provider memory', () => fixture(async ({ h, st }) => {
   fs.mkdirSync(`${h.temp}/roles`);
   fs.writeFileSync(`${h.temp}/roles/fixture.md`, 'ROLE_BODY');
   fs.writeFileSync(`${h.temp}/state/current-role.json`, JSON.stringify({ role: 'fixture' }));
@@ -57,13 +57,15 @@ test('default wakes contain no inline memory, slang, message history or role bod
   st.unread.push(st.recentMessages[0]);
   await h.deliverPrompt(GROUP, '', { wakeReason: 'question' });
   const lean = h.calls.prompts.at(-1).content[0].text;
-  for (const secret of ['ROLE_BODY', 'CHAT_BODY', '喜欢摄影', '词0', '含义0']) assert.ok(!lean.includes(secret), secret);
+  for (const text of ['ROLE_BODY', 'CHAT_BODY']) assert.ok(lean.includes(text), text);
+  for (const secret of ['喜欢摄影', '词0', '含义0']) assert.ok(!lean.includes(secret), secret);
   assert.match(lean, /按需上下文/);
   assert.equal(h.buildWakeSnapshotV2(GROUP), null);
   h.cfg.socialV2.context.strategy = 'inline';
   await h.deliverPrompt(GROUP, '', { wakeReason: 'question' });
   const legacy = h.calls.prompts.at(-1).content[0].text;
-  for (const text of ['CHAT_BODY', '含义0']) assert.ok(legacy.includes(text), text);
+  for (const text of ['ROLE_BODY', 'CHAT_BODY', '本次消息快照']) assert.ok(legacy.includes(text), text);
+  assert.ok(!legacy.includes('含义0'), 'unrelated slang is not injected by the old inline fallback');
   assert.ok(!legacy.includes('喜欢摄影'), '即使 inline 也不绕过提供者授权自动注入记忆');
   assert.ok(lean.length < legacy.length);
 }));
