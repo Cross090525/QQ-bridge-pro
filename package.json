@@ -44,6 +44,7 @@
     "test:preset-prompt": "node scripts/test-preset-prompt.mjs",
     "test:role-card": "node scripts/test-role-card.mjs",
     "test:persona-retention": "node --test scripts/test-persona-retention.mjs",
+    "test:participation": "node --test scripts/test-participation-context.mjs",
     "preview:console": "node scripts/console-ui-fixture.mjs",
     "verify:adaptation": "node scripts/verify-dsh-020-adaptation.mjs",
     "test:dsh-auth": "node scripts/test-dsh-auth.mjs",

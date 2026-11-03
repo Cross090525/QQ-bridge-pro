@@ -960,7 +960,7 @@ server.tool('qq_time_resolve', '涉及相对日期必须使用：referenceTime�
   catch (error) { return {isError:true, content:[{type:'text',text:error.message}]}; }
 });
 
-server.tool('qq_working_memory', '读取或更新当前群的实时工作记忆。read返回snapshot，input可用query关键词或messageId=messages.id回看原文；update须带revision。发现NSFW时用discardMessageIds:[已展示的messages.id]清除近期缓存、未读及关联工作状态，每次最多10条。topics/facts/questions/uncertainties为完整替换列表，每项{text,status:active|dormant|resolved,certainty:reported|confirmed|inferred,sources:实际展示的messages.id数组}。media为[{sourceId,summary}]，仅总结已看到证据的媒体。decision为{action:observe|need_context|reply,note:简短依据,sources}，不保存完整思考；reply不自动发送。不被@不等于无关，媒体未知时先补信息。', {
+server.tool('qq_working_memory', '读取或更新当前群的实时工作记忆。read返回snapshot，input可用query关键词或messageId=messages.id回看原文；update须带revision。发现NSFW时用discardMessageIds:[已展示的messages.id]清除近期缓存、未读及关联工作状态，每次最多10条。topics/facts/questions/uncertainties为完整替换列表，每项{text,status:active|dormant|resolved,certainty:reported|confirmed|inferred,sources:实际展示的messages.id数组}。media为[{sourceId,summary}]，仅总结已看到证据的媒体。decision为{action:observe|need_context|reply,note:简短依据,sources}，不保存完整思考；reply不自动发送。先按addressing判断实际@与引用对象，普通群消息和对别人说的话默认观察；媒体未知不是要求你发言。', {
   key: z.string(), token: z.string().min(1), operation: z.enum(['read', 'update']),
   input: z.record(z.string(), z.unknown()).optional(),
 }, async ({ key, token, operation, input }) => {

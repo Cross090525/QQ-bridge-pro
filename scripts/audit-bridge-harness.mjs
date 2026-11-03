@@ -26,6 +26,7 @@ import * as dualMode from '../src/core/dual-mode.mjs';
 import * as contextQuery from '../src/core/context-query.mjs';
 import { selectRelevantSlang } from '../src/slang-reference.mjs';
 import { SlangReferenceStore } from '../src/core/slang-reference-store.mjs';
+import * as participation from '../src/core/participation.mjs';
 import { WorkingMemory, ObservationQueue, observationServices } from '../src/core/working-memory.mjs';
 import * as publicApi from '../src/core/public-api.mjs';
 import * as frameworkContent from '../src/framework/content.mjs';
@@ -43,7 +44,7 @@ import { UsageQuotas, normalizeQuotaConfig, QUOTA_RESOURCES } from '../src/core/
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-export async function bridgeHarness({ config = {}, savedState, files = {}, globals = {} } = {}) {
+export async function bridgeHarness({ config = {}, savedState, files = {}, globals = {}, gatewayMessages = {} } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-audit-bridge-'));
   fs.mkdirSync(path.join(temp, 'src'));
   fs.mkdirSync(path.join(temp, 'state'));
@@ -109,6 +110,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     callUnary: async (method, params) => { calls.cancelled.push({ method, params }); return success({ accepted: true }); },
   };
   class FakeBot {
+    async getMessage(id) { return gatewayMessages[String(id)] ?? null; }
     async sendPrivateMessage(id, text) { calls.sent.push({ kind: 'private', id, text }); }
     async sendGroupMessage(id, text) { calls.sent.push({ kind: 'group', id, text }); }
     async getImage({ file }) {
@@ -188,7 +190,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
-    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...dualMode, ...contextQuery, selectRelevantSlang, SlangReferenceStore, ...publicApi, WorkingMemory, ObservationQueue, observationServices,
+    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...dualMode, ...contextQuery, selectRelevantSlang, SlangReferenceStore, ...participation, ...publicApi, WorkingMemory, ObservationQueue, observationServices,
     ...frameworkContent, FrameworkMediaStore, ContentServiceRuntime, ...extensionPermissionsModule, MemoryProviderRuntime, ...memoryCompat, DebateTasks, handleDebateApi, projectDebateContext,
     DebateRequests, normalizeDebateWake, ManagedDebateWorkers, spawn: () => { throw Error('fixture forbids real worker spawning'); },
     DshDebateAnalyzer, UsageQuotas: class extends UsageQuotas { constructor(options) { super({ ...options, waitMs: 0 }); } }, normalizeQuotaConfig, QUOTA_RESOURCES,
