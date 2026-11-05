@@ -15,7 +15,7 @@ const pkg = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8'
 const revision = execFileSync('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim();
 const provider = { id: 'haitang', description: '本机 Haitang 独立记忆，按会话分库，全部操作自动授权',
   version: `${pkg.version}+${revision.slice(0, 12)}`, approvalMode: 'automatic',
-  operations: ['query', 'write', 'update', 'delete', 'clear', 'ingest'],
+  operations: ['query', 'write', 'update', 'delete', 'clear', 'ingest'], features: ['temporal-v1'],
   transport: { type: 'stdio', command: process.execPath, args: [path.join(root, 'integrations/haitang-memory.mjs'), `--upstream=${source}`, `--data=${data}`] }, tool: 'memory', timeoutMs: 30000 };
 normalizeMemoryProviders([provider]);
 const configFile = path.join(root, 'config.json');

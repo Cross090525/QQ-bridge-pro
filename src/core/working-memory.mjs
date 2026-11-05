@@ -19,13 +19,14 @@ export class WorkingMemory {
   get(key) {
     const file = this.file(key);
     if (!this.states.has(key)) {
-      let state = { version: 1, revision: 0, messages: [], media: [], topics: [], facts: [], questions: [], uncertainties: [], consideredIds: [], decision: null };
+      let state = { version: 1, revision: 0, messages: [], media: [], topics: [], facts: [], questions: [], uncertainties: [], consideredIds: [], deletedIds: [], evictedPending: 0, decision: null };
       if (fs.existsSync(file)) {
         try {
           const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
           if (saved.version !== 1 || !Number.isSafeInteger(saved.revision) || !Array.isArray(saved.messages)
             || !Array.isArray(saved.media) || LISTS.some(k => !Array.isArray(saved[k]))) throw Error();
-          state = { consideredIds: [], ...saved };
+          state = { consideredIds: [], deletedIds: [], evictedPending: 0, ...saved };
+          if (!Array.isArray(state.deletedIds)) throw Error();
         } catch { fail('实时工作记忆无法读取，保留原文件；请恢复备份', 503); }
       }
       this.states.set(key, state);
@@ -40,7 +41,7 @@ export class WorkingMemory {
   }
   record(key, message) {
     const state = copy(this.get(key));
-    if (state.messages.some(m => m.id === message.id)) return;
+    if (state.deletedIds.includes(message.id) || state.messages.some(m => m.id === message.id)) return;
     const addressing = normalizeAddressing(message.addressing);
     state.messages.push({ id: String(message.id), seq: message.seq ?? null, messageId: str(message.messageId, 100),
       sender: str(message.sender, 100), userId: str(message.userId, 30), isSelf: message.isSelf === true, origin: message.origin === 'debate' ? 'debate' : 'chat',
@@ -48,8 +49,12 @@ export class WorkingMemory {
       text: str(message.plain ?? message.text, 12000), textTruncated: String(message.plain ?? message.text ?? '').length > 12000,
       replyToMessageId: str(message.replyToMessageId, 100),
       ...(addressing ? { addressing } : {}),
-      quoteTargetIsSelf: message.quoteTargetIsSelf === true, time: Number(message.time) || this.now(),
+      quoteTargetIsSelf: message.quoteTargetIsSelf === true, time: Number(message.receivedAt ?? message.time) || this.now(),
+      receivedAt: Number(message.receivedAt ?? message.time) || this.now(),
+      eventAt: Number.isSafeInteger(message.eventAt) && message.eventAt > 0 ? message.eventAt : null,
       media: (message.content || []).filter(c => c.sourceId).slice(0, 20).map(c => ({ sourceId: c.sourceId, type: c.type })) });
+    state.evictedPending += state.messages.slice(0, Math.max(0, state.messages.length - this.maxMessages))
+      .filter(m => !m.isSelf && !state.consideredIds.includes(m.id)).length;
     state.messages = state.messages.slice(-this.maxMessages);
     const retained = new Set(state.messages.map(m => m.id));
     state.consideredIds = state.consideredIds.filter(id => retained.has(id));
@@ -78,13 +83,17 @@ export class WorkingMemory {
       ? { ...m, text: m.text.slice(0, 1200) + '\n…\n' + m.text.slice(-200), excerpt: true } : m);
     if (messageId && messages[0]) { messages[0] = copy(matching.find(m => m.id === messageId)); }
     const packet = { revision: state.revision, updatedAt: state.updatedAt || null,
-      topics: state.topics.map(t => ({ ...t, status: t.status === 'active' && now - t.updatedAt > 3600000 ? 'dormant' : t.status })),
+      topics: state.topics.map(t => ({ ...t, status: t.status === 'active' && now - (t.lastEvidenceAt ?? t.updatedAt) > 3600000 ? 'dormant' : t.status })),
       facts: state.facts, questions: state.questions, uncertainties: state.uncertainties,
       decision: state.decision && { ...state.decision, historical: true, stale: matching.some(m => !m.isSelf && m.time > state.decision.updatedAt) }, media: state.media.slice(-20), messages,
-      pendingCount: pending.length, totalMessages: state.messages.length, matchedMessages: matching.length,
+      pendingCount: pending.length, evictedPending: state.evictedPending, totalMessages: state.messages.length, matchedMessages: matching.length,
       truncated: matching.length > messages.length || messages.some(m => m.excerpt) };
-    // Keep newest raw context and compact structured state. Never pretend omitted data was presented.
-    while (JSON.stringify(packet).length > maxChars && packet.messages.length > 1) { packet.messages.shift(); packet.truncated = true; }
+    // Reserve the oldest pending source, then spend the remaining budget on context.
+    const anchor = !query && !messageId ? pending[0]?.id : null;
+    while (JSON.stringify(packet).length > maxChars && packet.messages.length > 1) {
+      const removable = packet.messages.findIndex(m => m.id !== anchor && !pending.slice(0, 12).some(p => p.id === m.id));
+      packet.messages.splice(removable >= 0 ? removable : packet.messages.length - 1, 1); packet.truncated = true;
+    }
     while (JSON.stringify(packet).length > maxChars && packet.media.length) { packet.media.shift(); packet.truncated = true; }
     for (const k of ['facts', 'questions', 'uncertainties', 'topics']) {
       packet[k] = [...packet[k]];
@@ -99,9 +108,27 @@ export class WorkingMemory {
     }
     return copy(packet);
   }
+  reset(key) { this.receipts.delete(key); }
+  requireEvidence(key, ids) {
+    const state = this.get(key), receipt = this.receipts.get(key);
+    if (!Array.isArray(ids) || !ids.length || ids.length > 10 || ids.some(id => typeof id !== 'string' || state.deletedIds.includes(id) || !receipt?.ids.has(id))) fail('必须引用当前会话实际展示的来源编号');
+    return [...new Set(ids)].map(id => {
+      const raw = state.messages.find(m => m.id === id);
+      if (raw) return raw;
+      const summary = LISTS.flatMap(k => state[k]).find(item => item.sources.includes(id));
+      return { id, isSelf: true, retainedSummary: !!summary, userId: '', eventAt: null };
+    });
+  }
+  offeredMessages(key, messages) {
+    const current = this.get(key);
+    const offered = current.messages.filter(m => messages.some(n => n.id === m.id || (n.messageId && String(n.messageId) === m.messageId)
+      || (n.seq != null && n.seq === m.seq && n.time === m.time)));
+    this.offered(key, { messages: offered, media: [], topics: [], facts: [], questions: [], uncertainties: [] });
+  }
   offered(key, packet, preparedSources = []) {
     const receipt = this.receipts.get(key) || { ids: new Set(), media: new Set() };
     for (const m of packet.messages) receipt.ids.add(m.id);
+    receipt.batch = [...new Set([...(receipt.batch || []), ...packet.messages.map(m => m.id)])];
     // Previously validated summaries remain usable when their raw source has
     // aged out; this grants a reference to the summary, not the missing original.
     for (const k of LISTS) for (const item of packet[k]) for (const id of item.sources) receipt.ids.add(id);
@@ -112,23 +139,34 @@ export class WorkingMemory {
     // prepared media belonging to this conversation.
     for (const sourceId of preparedSources) if (current.media.some(m => m.sourceId === sourceId && ['prepared', 'understood'].includes(m.status))) receipt.media.add(sourceId);
     const valid = new Set([...current.messages.map(m => m.id), ...LISTS.flatMap(k => current[k].flatMap(item => item.sources))]);
-    receipt.ids = new Set([...receipt.ids].filter(id => valid.has(id))); this.receipts.set(key, receipt);
+    receipt.ids = new Set([...receipt.ids].filter(id => valid.has(id) && !current.deletedIds.includes(id))); this.receipts.set(key, receipt);
+    receipt.batch = receipt.batch.filter(id => current.messages.some(m => m.id === id) && !current.deletedIds.includes(id));
   }
   update(key, input) {
     if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !['revision', ...LISTS, 'decision', 'media', 'discardMessageIds'].includes(k))) fail('实时记忆更新参数无效');
     const state = copy(this.get(key)), receipt = this.receipts.get(key);
     if (input.revision !== state.revision) fail('实时记忆版本已变化，请重新读取', 409);
     const evidence = value => {
-      if (!Array.isArray(value) || !value.length || value.length > 10 || value.some(id => typeof id !== 'string' || !receipt?.ids.has(id))) fail('必须引用当前会话实际展示的来源编号');
+      this.requireEvidence(key, value);
       return [...new Set(value)];
     };
     for (const k of LISTS) if (input[k] !== undefined) {
       if (!Array.isArray(input[k]) || input[k].length > (k === 'topics' ? 5 : 10)) fail('实时记忆条目过多');
+      const previous = state[k];
       state[k] = input[k].map(item => {
         if (!item || typeof item.text !== 'string' || !item.text.trim() || item.text.length > 500 || !['active', 'dormant', 'resolved'].includes(item.status)) fail('条目需要text和有效status');
         if (!['reported', 'confirmed', 'inferred'].includes(item.certainty)) fail('必须区分转述、确认和推测');
-        return { text: item.text, status: item.status, certainty: item.certainty, sources: evidence(item.sources), updatedAt: this.now() };
+        const sources = evidence(item.sources);
+        if (k === 'facts' && item.certainty === 'confirmed' && this.requireEvidence(key, sources).every(m => m.isSelf)) fail('机器人自述不能独自确认用户事实');
+        const old = previous.find(p => item.id ? p.id === item.id : p.text === item.text && JSON.stringify(p.sources) === JSON.stringify(sources));
+        if (item.id && !old) fail('条目ID不存在，请省略ID创建');
+        const changed = !old || old.text !== item.text || old.status !== item.status || old.certainty !== item.certainty || JSON.stringify(old.sources) !== JSON.stringify(sources);
+        const evidenceTimes = this.requireEvidence(key, sources).map(m => m.eventAt ?? m.receivedAt ?? m.time).filter(Number.isFinite);
+        return { id: old?.id || crypto.randomUUID(), text: item.text, status: item.status, certainty: item.certainty, sources,
+          updatedAt: changed ? this.now() : old.updatedAt, modifiedAt: changed ? this.now() : (old.modifiedAt ?? old.updatedAt),
+          lastEvidenceAt: !old || JSON.stringify(old.sources) !== JSON.stringify(sources) ? Math.max(old?.lastEvidenceAt ?? 0, ...evidenceTimes, 0) || this.now() : (old.lastEvidenceAt ?? old.updatedAt) };
       });
+      if (new Set(state[k].map(item => item.id)).size !== state[k].length) fail('条目ID不能重复');
     }
     if (input.media !== undefined) {
       if (!Array.isArray(input.media) || input.media.length > 10) fail('媒体摘要过多');
@@ -144,10 +182,11 @@ export class WorkingMemory {
       if (!d || !['observe', 'need_context', 'reply'].includes(d.action) || typeof d.note !== 'string' || d.note.length > 300) fail('参与决策必须为observe/need_context/reply和简短说明');
       const sources = evidence(d.sources);
       state.decision = { action: d.action, note: d.note, sources, ...participationDecisionFields(d), updatedAt: this.now() };
-      state.consideredIds = [...new Set([...state.consideredIds, ...receipt.ids])].slice(-this.maxMessages);
+      state.consideredIds = [...new Set([...state.consideredIds, ...(receipt.batch || []), ...sources])].slice(-this.maxMessages);
     }
     if (input.discardMessageIds !== undefined) {
       const ids = new Set(evidence(input.discardMessageIds));
+      if (state.deletedIds.length + ids.size > 10000) fail('删除记录容量已满，请由管理员维护存储', 409);
       if ([...ids].some(id => !state.messages.some(m => m.id === id && !m.isSelf))) fail('只能清除已展示的收到的消息');
       const media = new Set(state.messages.filter(m => ids.has(m.id)).flatMap(m => m.media.map(x => x.sourceId)));
       state.messages = state.messages.filter(m => !ids.has(m.id));
@@ -155,8 +194,15 @@ export class WorkingMemory {
       for (const k of LISTS) state[k] = state[k].filter(x => !x.sources.some(id => ids.has(id)));
       if (state.decision?.sources.some(id => ids.has(id))) state.decision = null;
       state.consideredIds = state.consideredIds.filter(id => !ids.has(id));
+      state.deletedIds = [...new Set([...state.deletedIds, ...ids])];
     }
     state.revision++; state.updatedAt = this.now(); this.save(key, state);
+    if (input.decision) receipt.batch = [];
+    if (input.discardMessageIds) {
+      for (const id of input.discardMessageIds) receipt.ids.delete(id);
+      receipt.batch = (receipt.batch || []).filter(id => !state.deletedIds.includes(id));
+      receipt.media = new Set([...receipt.media].filter(id => state.media.some(m => m.sourceId === id)));
+    }
     return { revision: state.revision, decision: state.decision };
   }
 }

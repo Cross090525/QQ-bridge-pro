@@ -2255,9 +2255,21 @@ button:active:not(:disabled) {
 <details class="settings-group" id="workingMemoryPanel"><summary>实时工作记忆</summary><div class="settings-content">
 <p class="meta">持续理解近期聊天、媒体与话题，再决定是否发言。每个群独立保存；长期记忆仍使用下方提供者。</p>
 <div class="row"><label style="display:flex;align-items:center;gap:8px;flex:1;width:auto"><input type="checkbox" id="workingMemoryEnabled" style="width:auto;flex:none"> 自动观察与实时工作记忆</label><button id="workingMemorySave" class="small">保存观察设置</button></div>
+<div class="row" style="flex-wrap:wrap"><label style="width:auto"><input id="taskMemoryEnabled" type="checkbox" style="width:auto"> 未完事项与自动接续</label><label style="width:auto"><input id="temporalRecallEnabled" type="checkbox" style="width:auto"> 本地时效记忆匹配</label></div>
 <div class="row"><input id="workingMemoryKey" type="text" placeholder="直接输入群号，或 group:群号 / private:QQ号" style="flex:1"><button id="workingMemoryLoad" class="small">查看当前记忆</button><span class="meta" id="workingMemoryMsg"></span></div>
 <div id="workingMemorySummary" style="white-space:pre-wrap">选择会话并查看当前话题与参与状态。</div>
 <details><summary>查看来源与完整快照</summary><pre id="workingMemoryOutput">（尚未加载）</pre></details>
+</div></details>
+<details class="settings-group" id="taskMemoryPanel"><summary>未完事项与任务记忆</summary><div class="settings-content">
+<p class="meta">保存待续问题、等待材料和分步待办。截止后仍可能未完成；只记住和相关接续，当前不提供定时提醒。私聊请填写 private:QQ号。</p>
+<div class="row"><input id="taskMemoryKey" placeholder="group:群号 / private:QQ号" style="flex:1"><button id="taskMemoryLoad" class="small">加载事项</button><span id="taskMemoryMsg" class="meta" role="status"></span></div>
+<div class="row"><input id="taskMemoryQuery" placeholder="搜索事项" style="flex:1"><select id="taskMemoryFilter"><option value="">所有状态</option value="pending">待处理</option><option value="in_progress">进行中</option><option value="waiting">等待条件</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select><button id="taskMemoryPrevious" class="small">上一页</button><button id="taskMemoryNext" class="small">下一页</button></div>
+<div id="taskMemoryList">加载后查看事项、依据和进度。</div>
+<div class="row"><button id="taskMemoryNew" class="small">新建事项</button><span id="taskMemorySelection" class="meta">选择事项后可编辑。</span></div>
+<div class="row"><label for="taskMemoryOwner">负责人</label><input id="taskMemoryOwner" placeholder="实际 QQ 号"><select id="taskMemoryKind"><option value="continuation">对话待续</option><option value="bot_task">机器人待办</option><option value="user_plan">用户计划</option></select><select id="taskMemoryStatus"><option value="pending">待处理</option><option value="in_progress">进行中</option><option value="waiting">等待条件</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select></div>
+<label for="taskMemoryText">事项与必要背景</label><textarea id="taskMemoryText" rows="3" maxlength="500" style="width:100%"></textarea>
+<div class="row"><label for="taskMemoryWaiting">等待条件 / 下一步</label><input id="taskMemoryWaiting" maxlength="300" style="flex:1"></div>
+<div class="row"><label for="taskMemoryDue">截止时间（浏览器时区）</label><input id="taskMemoryDue" type="datetime-local"><button id="taskMemorySave" class="small">保存事项</button><button id="taskMemoryDelete" class="small danger">删除事项</button></div>
 </div></details>
 <details class="settings-group" id="extensionPermissionPanel"><summary>MCP / skills 授权与审批</summary><div class="settings-content">
       <p class="meta">普通扩展默认拒绝，write / execute 需逐次审批。本机记忆提供者若由管理员启用 automatic 模式，记忆操作可自动执行；显式 deny / ask 规则仍优先。群与会话隔离始终保留。</p>
@@ -2291,6 +2303,7 @@ button:active:not(:disabled) {
         <button id="v2MemoryClearAll" class="small danger">清空全部</button>
         <span class="meta" id="v2MemoryMsg"></span>
       </div>
+      <div class="row"><input id="v2MemoryQuery" placeholder="搜索记忆" style="flex:1"><input id="v2MemoryMember" placeholder="主体标识"><select id="v2MemoryTimeMode"><option value="current">当前有效</option><option value="history">历史（需 temporal-v1）</option></select><button id="v2MemoryPrevious" class="small">上一页</button><button id="v2MemoryNext" class="small">下一页</button></div>
       <div id="v2MemoryOutput" class="tool-log-table">（空）</div>
 
       </div></details>
@@ -3746,23 +3759,44 @@ function renderV2Memory(data) {
     const heading = document.createElement('p'); heading.textContent = `${item.category || '未分类'}${item.subject ? ' · ' + item.subject : ''} · ${item.id}`;
     const content = document.createElement('pre'); content.textContent = item.text;
     row.append(heading, content);
+    if (item.metadata?.temporal) {
+      const t = item.metadata.temporal, validity = document.createElement('p');
+      const date = value => value == null ? '未知/未限定' : new Date(value).toLocaleString();
+      validity.textContent = `有效期：${date(t.validFrom)} → ${date(t.validTo)} · ${t.assertionType === 'inferred' ? '推断' : '来源陈述'} · ${t.timeZone} · 来源：${t.sources.join('、')}`;
+      row.append(validity);
+    }
     if (item.metadata) {
       const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = '插件元数据';
       const pre = document.createElement('pre'); pre.textContent = JSON.stringify(item.metadata, null, 2); details.append(summary, pre); row.append(details);
     }
     for (const action of ['edit', 'remove']) {
+      if (action === 'edit' && item.metadata?.temporal) continue;
       const button = document.createElement('button'); button.className = 'small'; button.dataset.action = action; button.dataset.id = item.id;
+      button.dataset.key = data.key;
       button.dataset.text = item.text; button.dataset.providerId = data.providerId; button.textContent = action === 'edit' ? '申请编辑' : '申请删除'; row.append(button);
     }
     box.append(row);
   }
 }
-async function loadV2Memory() {
+let memoryOffset = 0, memoryCursor = '', memoryNextCursor = null, memoryOffsets = [];
+async function loadV2Memory(reset = true) {
+  if (reset) { memoryOffset = 0; memoryCursor = ''; memoryOffsets = []; }
   const key = document.getElementById('v2MemoryKey').value.trim(); const msg = document.getElementById('v2MemoryMsg');
   if (!key) { msg.textContent = '请输入会话 key'; return; }
-  try { renderV2Memory(await memoryConsoleRequest('/api/socialV2/memory?key=' + encodeURIComponent(key))); }
+  try {
+    const mode = document.getElementById('v2MemoryTimeMode').value;
+    const input = { query: document.getElementById('v2MemoryQuery').value, member: document.getElementById('v2MemoryMember').value, offset: memoryOffset, cursor: memoryCursor, limit: 20,
+      ...(mode === 'history' ? { options: { temporal: { mode: 'history' } } } : {}) };
+    const r = await memoryConsoleRequest('/api/memory/query', 'POST', { key, input });
+    memoryNextCursor = r.nextCursor; renderV2Memory(r);
+    document.getElementById('v2MemoryNext').disabled = !memoryNextCursor;
+    document.getElementById('v2MemoryPrevious').disabled = !memoryOffsets.length;
+  }
   catch (error) { msg.textContent = error.message; msg.className = 'meta err'; }
 }
+document.getElementById('v2MemoryNext').addEventListener('click', () => { if (memoryNextCursor) { memoryOffsets.push({ offset: memoryOffset, cursor: memoryCursor }); memoryOffset += 20; memoryCursor = memoryNextCursor; loadV2Memory(false); } });
+document.getElementById('v2MemoryPrevious').addEventListener('click', () => { const previous = memoryOffsets.pop() || {offset:0,cursor:''}; memoryOffset = previous.offset; memoryCursor = previous.cursor; loadV2Memory(false); });
+for (const id of ['v2MemoryKey','v2MemoryQuery','v2MemoryMember','v2MemoryTimeMode']) document.getElementById(id).addEventListener('change', () => loadV2Memory());
 let loadedParticipationKey = null;
 function participationKey() {
   let key = document.getElementById('participationKey').value.trim();
@@ -3804,11 +3838,97 @@ document.getElementById('participationLoad').addEventListener('click', () => par
 document.getElementById('participationSave').addEventListener('click', () => participationRequest('save'));
 document.getElementById('participationInherit').addEventListener('click', () => participationRequest('inherit'));
 participationRequest();
+let loadedTaskKey = null, taskRevision = null, taskSelection = undefined, taskOffset = 0, taskNextOffset = null;
+const taskStateLabels = { pending: '待处理', in_progress: '进行中', waiting: '等待条件', completed: '已完成', cancelled: '已取消' };
+function taskKey() {
+  let key = document.getElementById('taskMemoryKey').value.trim();
+  if (/^[1-9]\d{0,15}$/.test(key)) key = 'group:' + key;
+  if (!/^(group|private):[1-9]\d{0,15}$/.test(key)) throw new Error('请输入群号或准确的 private:QQ号');
+  return key;
+}
+function selectTask(item) {
+  taskSelection = item || null;
+  document.getElementById('taskMemorySelection').textContent = item ? item.id : '新建事项，由管理员记录';
+  document.getElementById('taskMemoryOwner').value = item?.ownerId || '';
+  document.getElementById('taskMemoryOwner').disabled = !!item;
+  document.getElementById('taskMemoryKind').value = item?.kind || 'continuation';
+  document.getElementById('taskMemoryKind').disabled = !!item;
+  document.getElementById('taskMemoryStatus').value = item?.status || 'waiting';
+  document.getElementById('taskMemoryText').value = item?.text || '';
+  document.getElementById('taskMemoryWaiting').value = item?.waitingFor || '';
+  const local = item?.dueAt ? new Date(item.dueAt - new Date(item.dueAt).getTimezoneOffset() * 60000).toISOString().slice(0,16) : '';
+  document.getElementById('taskMemoryDue').value = local;
+  document.getElementById('taskMemoryDelete').disabled = !item;
+  document.getElementById('taskMemorySave').disabled = !!item && ['completed','cancelled'].includes(item.status);
+}
+async function loadTasks(reset = true) {
+  const msg = document.getElementById('taskMemoryMsg');
+  try {
+    const key = taskKey();
+    if (reset || key !== loadedTaskKey) taskOffset = 0;
+    const params = new URLSearchParams({ key, query: document.getElementById('taskMemoryQuery').value,
+      status: document.getElementById('taskMemoryFilter').value, offset: taskOffset });
+    const r = await api('/api/socialV2/task-memory?' + params);
+    if (!r.ok) throw new Error(r.error || '加载失败');
+    loadedTaskKey = key; taskRevision = r.revision; taskNextOffset = r.nextOffset; taskSelection = undefined;
+    document.getElementById('taskMemoryKey').value = key;
+    const box = document.getElementById('taskMemoryList'); box.replaceChildren();
+    for (const item of r.items) {
+      const card = document.createElement('div'); card.className = 'memory-section';
+      const title = document.createElement('p'); title.textContent = `${taskStateLabels[item.status]}${item.overdue ? ' · 已逾期' : ''} · 负责人 ${item.ownerId} · ${item.text}`;
+      const details = document.createElement('pre'); details.textContent = `等待/下一步：${item.waitingFor || '未填写'}\n截止：${item.dueAt ? new Date(item.dueAt).toLocaleString() : '未限定'}\n来源：${item.sources.join('、') || '管理员记录'}\n完成依据：${item.completionEvidence || '尚未报告完成'}`;
+      const edit = document.createElement('button'); edit.className = 'small'; edit.textContent = '查看 / 编辑'; edit.addEventListener('click', () => selectTask(item));
+      card.append(title, details, edit); box.append(card);
+    }
+    if (!r.items.length) box.textContent = '当前筛选没有事项';
+    document.getElementById('taskMemoryPrevious').disabled = taskOffset === 0;
+    document.getElementById('taskMemoryNext').disabled = taskNextOffset == null;
+    selectTask(null); taskSelection = undefined;
+    document.getElementById('taskMemorySave').disabled = true;
+    document.getElementById('taskMemoryDelete').disabled = true;
+    document.getElementById('taskMemorySelection').textContent = '选择已有事项或新建';
+    msg.textContent = `共 ${r.total} 项 · 版本 ${r.revision}`;
+  } catch (error) { loadedTaskKey = null; taskRevision = null; msg.textContent = error.message; }
+}
+document.getElementById('taskMemoryLoad').addEventListener('click', () => loadTasks());
+document.getElementById('taskMemoryNext').addEventListener('click', () => { if (taskNextOffset != null) { taskOffset = taskNextOffset; loadTasks(false); } });
+document.getElementById('taskMemoryPrevious').addEventListener('click', () => { taskOffset = Math.max(0,taskOffset - 20); loadTasks(false); });
+for (const id of ['taskMemoryQuery','taskMemoryFilter']) document.getElementById(id).addEventListener('change', () => loadTasks());
+document.getElementById('taskMemoryKey').addEventListener('input', () => { loadedTaskKey = null; taskSelection = undefined; });
+document.getElementById('taskMemoryNew').addEventListener('click', () => {
+  try { if (taskKey() !== loadedTaskKey) throw new Error('先加载目标会话'); selectTask(null); }
+  catch (error) { document.getElementById('taskMemoryMsg').textContent = error.message; }
+});
+async function saveTask(remove = false) {
+  const msg = document.getElementById('taskMemoryMsg');
+  try {
+    const key = taskKey();
+    if (key !== loadedTaskKey || taskSelection === undefined || taskRevision == null) throw new Error('会话已变化，请先加载并选择事项');
+    const due = document.getElementById('taskMemoryDue').value;
+    const input = remove ? { revision: taskRevision, id: taskSelection?.id, remove: true } : {
+      revision: taskRevision, ...(taskSelection ? { id: taskSelection.id } : {}),
+      ownerId: document.getElementById('taskMemoryOwner').value, kind: document.getElementById('taskMemoryKind').value,
+      status: document.getElementById('taskMemoryStatus').value, text: document.getElementById('taskMemoryText').value,
+      waitingFor: document.getElementById('taskMemoryWaiting').value, dueAt: due ? new Date(due).getTime() : null,
+    };
+    const r = await api('/api/socialV2/task-memory', 'POST', { key, ...input });
+    if (!r.ok) throw new Error(r.error || '保存失败');
+    await loadTasks(false); msg.textContent = remove ? '事项已删除' : '已保存；定时提醒未安排';
+  } catch (error) { msg.textContent = error.message; }
+}
+document.getElementById('taskMemorySave').addEventListener('click', () => saveTask());
+document.getElementById('taskMemoryDelete').addEventListener('click', () => saveTask(true));
 async function loadWorkingMemorySettings() {
-  try { const r = await api('/api/socialV2/config'); document.getElementById('workingMemoryEnabled').checked = r.config?.workingMemory?.enabled !== false; } catch {}
+  try {
+    const r = await api('/api/socialV2/config');
+    document.getElementById('workingMemoryEnabled').checked = r.config?.workingMemory?.enabled !== false;
+    document.getElementById('taskMemoryEnabled').checked = r.config?.workingMemory?.tasksEnabled !== false;
+    document.getElementById('temporalRecallEnabled').checked = r.config?.workingMemory?.temporalRecall !== false;
+  } catch {}
 }
 document.getElementById('workingMemorySave').addEventListener('click', async () => {
-  const r = await api('/api/socialV2/config', 'POST', { workingMemory: { enabled: document.getElementById('workingMemoryEnabled').checked } });
+  const r = await api('/api/socialV2/config', 'POST', { workingMemory: { enabled: document.getElementById('workingMemoryEnabled').checked,
+    tasksEnabled: document.getElementById('taskMemoryEnabled').checked, temporalRecall: document.getElementById('temporalRecallEnabled').checked } });
   document.getElementById('workingMemoryMsg').textContent = r.ok ? '已保存，下批消息生效' : (r.error || '保存失败');
 });
 document.getElementById('workingMemoryLoad').addEventListener('click', async () => {
@@ -3846,6 +3966,7 @@ document.getElementById('v2MemoryClearAll').addEventListener('click', async () =
 document.getElementById('v2MemoryOutput').addEventListener('click', async event => {
   const button = event.target.closest('button[data-action]'); if (!button) return;
   const key = document.getElementById('v2MemoryKey').value.trim(); if (!key) return;
+  if (button.dataset.key !== key) { document.getElementById('v2MemoryMsg').textContent = '会话已变化，请重新加载记忆'; return; }
   let route; let input;
   if (button.dataset.action === 'edit') {
     const value = prompt('修改记忆正文（发送给提供者，仍需审批）：', button.dataset.text); if (value === null) return;

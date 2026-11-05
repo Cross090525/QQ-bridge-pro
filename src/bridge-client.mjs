@@ -47,6 +47,8 @@ export class QQBridgeClient {
   }
   workingContext({ query, messageId } = {}) { return this.request('/api/v1/working/context', { params: { query, messageId } }); }
   updateWorkingContext(input) { return this.request('/api/v1/working/context', { method: 'POST', body: input }); }
+  tasks(params = {}) { return this.request('/api/v1/tasks', { params }); }
+  updateTask(input) { return this.request('/api/v1/tasks', { method: 'POST', body: input }); }
   queryContext(query) { return this.request('/api/v1/context/query', { method: 'POST', body: query }); }
   contentServices(sourceId) { return this.request('/api/v1/content/services', { params: { sourceId } }); }
   processContent(serviceId, { sourceId, input = {}, approvalId } = {}) { return this.request('/api/v1/content/process', { method: 'POST', body: { serviceId, sourceId, input, approvalId } }); }

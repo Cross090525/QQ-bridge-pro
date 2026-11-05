@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { frameworkError } from './content.mjs';
 import { ExtensionPermissions, permissionDigest } from './permissions.mjs';
 import { RegisteredServiceTransport, normalizeServiceTransport } from './service-transport.mjs';
+import { temporalMetadata, temporalQuery, selectTemporal } from '../core/temporal-memory.mjs';
 
 export const MEMORY_PROTOCOL = 'qq-bridge.memory/v1';
 export const MEMORY_OPERATIONS = Object.freeze(['query', 'write', 'update', 'delete', 'clear', 'ingest']);
@@ -49,6 +50,7 @@ function selector(input) {
 export function normalizeMemoryInput(operation, input = {}) {
   if (operation === 'query') {
     object(input, ['query', 'member', 'category', 'limit', 'offset', 'cursor', 'maxChars', 'options']);
+    temporalQuery(input.options);
     return { query: text(input.query), member: text(input.member, 128), category: text(input.category, 128),
       limit: integer(input.limit, 5, 1, 20), offset: integer(input.offset, 0, 0, 100000), cursor: text(input.cursor, 256),
       maxChars: integer(input.maxChars, 3000, 500, 12000), options: metadata(input.options) };
@@ -57,6 +59,7 @@ export function normalizeMemoryInput(operation, input = {}) {
     object(input, ['id', 'text', 'category', 'subject', 'metadata', 'expiresAt']);
     const content = text(input.text, 2000);
     if (!content.trim()) throw frameworkError('记忆 text 不能为空');
+    if (temporalMetadata(input.metadata) && !input.id) throw frameworkError('时效记忆需要稳定id');
     return { ...(input.id === undefined ? {} : { id: identifier(input.id) }), text: content,
       category: text(input.category, 128), subject: text(input.subject, 128), metadata: metadata(input.metadata),
       ...(input.expiresAt === undefined ? {} : { expiresAt: integer(input.expiresAt, 0, 0, Number.MAX_SAFE_INTEGER) }) };
@@ -66,6 +69,7 @@ export function normalizeMemoryInput(operation, input = {}) {
     const patch = {};
     for (const field of ['text', 'category', 'subject']) if (input.patch[field] !== undefined) patch[field] = text(input.patch[field], field === 'text' ? 2000 : 128);
     if (input.patch.metadata !== undefined) patch.metadata = metadata(input.patch.metadata);
+    temporalMetadata(input.patch.metadata);
     if (input.patch.expiresAt !== undefined) patch.expiresAt = integer(input.patch.expiresAt, 0, 0, Number.MAX_SAFE_INTEGER);
     if (!Object.keys(patch).length) throw frameworkError('记忆更新 patch 不能为空');
     return { selector: selector(input.selector), patch };
@@ -88,11 +92,13 @@ export function normalizeMemoryProviders(config = []) {
     seen.add(provider.id);
     if (!Array.isArray(provider.operations) || !provider.operations.length || provider.operations.some(op => !MEMORY_OPERATIONS.includes(op)) || new Set(provider.operations).size !== provider.operations.length) throw frameworkError('记忆提供者 operations 无效');
     const transport = normalizeServiceTransport(provider.transport);
+    const features = provider.features ?? [];
+    if (!Array.isArray(features) || features.some(f => f !== 'temporal-v1')) throw frameworkError('记忆提供者features无效');
     const approvalMode = provider.approvalMode ?? 'required';
     if (!['required', 'automatic'].includes(approvalMode)) throw frameworkError('memory approvalMode 必须为 required 或 automatic');
     if (approvalMode === 'automatic' && transport.type === 'http' && !['127.0.0.1', 'localhost', '[::1]'].includes(new URL(transport.url).hostname)) throw frameworkError('自动记忆授权仅支持本机提供者');
     if (transport.type === 'stdio' && provider.operations.some(op => typeof (provider.tools?.[op] ?? provider.tool) !== 'string' || !(provider.tools?.[op] ?? provider.tool))) throw frameworkError('记忆 MCP 必须为每个操作配置固定 tool 或 tools 映射');
-    return { ...provider, transport, approvalMode, description: text(provider.description, 240), version: text(provider.version, 64, '1'),
+    return { ...provider, features, transport, approvalMode, description: text(provider.description, 240), version: text(provider.version, 64, '1'),
       timeoutMs: integer(provider.timeoutMs, 30000, 100, 180000) };
   });
 }
@@ -118,13 +124,13 @@ function normalizeResponse(raw, request, providerId) {
       affectedCount: integer(raw.affectedCount, raw.affectedIds.length, raw.affectedIds.length, Number.MAX_SAFE_INTEGER), untrusted: true };
   }
   if (!Array.isArray(raw.items) || raw.items.length > request.input.limit) throw frameworkError('记忆查询 items 超出请求范围', 502);
-  const items = raw.items.map(item => {
+  const items = selectTemporal(raw.items.map(item => {
     object(item, ['id', 'text', 'category', 'subject', 'metadata', 'score', 'expiresAt', 'updatedAt']);
     return { id: identifier(item.id), text: text(item.text, 8000), category: text(item.category, 128), subject: text(item.subject, 128),
       ...(item.metadata === undefined ? {} : { metadata: metadata(item.metadata) }),
       ...(item.updatedAt === undefined ? {} : { updatedAt: integer(item.updatedAt, 0, 0, Number.MAX_SAFE_INTEGER) }),
       ...(item.expiresAt === undefined ? {} : { expiresAt: integer(item.expiresAt, 0, 0, Number.MAX_SAFE_INTEGER) }) };
-  }).filter(item => !item.expiresAt || item.expiresAt > Date.now());
+  }), request.input.options);
   const result = { providerId, operation: 'query', items: [], nextCursor: raw.nextCursor == null ? null : text(raw.nextCursor, 256), truncated: false, untrusted: true };
   for (const item of items) {
     result.items.push(item);
@@ -141,17 +147,19 @@ function normalizeResponse(raw, request, providerId) {
 }
 
 export class MemoryProviderRuntime {
-  constructor({ providers = [], defaultProvider = null, namespaceSalt = '', permissions = new ExtensionPermissions(), getMessages = () => [], fetchImpl = globalThis.fetch } = {}) {
+  constructor({ providers = [], defaultProvider = null, namespaceSalt = '', permissions = new ExtensionPermissions(), getMessages = () => [], validateTemporal = () => {}, isSourceDeleted = () => false, onOperation = () => {}, fetchImpl = globalThis.fetch } = {}) {
     this.providers = normalizeMemoryProviders(providers); this.defaultProvider = defaultProvider;
     if (defaultProvider !== null && !this.providers.some(provider => provider.id === defaultProvider)) throw frameworkError('memory.provider 必须指向已注册提供者，或为 null');
     if (this.providers.length && !/^[a-f0-9]{64}$/.test(namespaceSalt)) throw frameworkError('记忆命名空间密钥无效');
     this.namespaceSalt = namespaceSalt; this.permissions = permissions; this.getMessages = getMessages;
     this.transport = new RegisteredServiceTransport({ fetchImpl }); this.inflight = new Map();
+    this.validateTemporal = validateTemporal; this.isSourceDeleted = isSourceDeleted;
+    this.onOperation = onOperation;
   }
   namespace(providerId, key) { return crypto.createHmac('sha256', this.namespaceSalt).update(`${providerId}\0${key}`).digest('hex'); }
   capabilities() { return this.providers.flatMap(provider => provider.operations.map(operation => ({ id: `memory.${provider.id}.${operation}`, effect: operation === 'query' ? 'read' : 'write', description: `${provider.description || provider.id} · ${operation}` }))); }
   list(key) {
-    return this.providers.map(provider => ({ id: provider.id, description: provider.description, version: provider.version, approvalMode: provider.approvalMode,
+    return this.providers.map(provider => ({ id: provider.id, description: provider.description, version: provider.version, features: provider.features, approvalMode: provider.approvalMode,
       operations: provider.operations.map(operation => ({ operation, capability: `memory.${provider.id}.${operation}`,
         permission: this.permissions.inspect({ key, capability: `memory.${provider.id}.${operation}`, manifest: publicManifest(provider, operation), dataScopes: memoryDataScopes(operation) }).decision }))
         .filter(item => item.permission !== 'deny') })).filter(provider => provider.operations.length);
@@ -164,7 +172,8 @@ export class MemoryProviderRuntime {
       if (!record) throw frameworkError('所选消息不在当前会话近期记录中', 404);
       return { seq, messageId: record.messageId == null ? null : String(record.messageId).slice(0, 128),
         sender: String(record.sender ?? '').slice(0, 100), userId: record.userId == null ? null : String(record.userId).slice(0, 32),
-        text: String(record.plain ?? record.text ?? '').slice(0, 1000), time: Number(record.time) || 0 };
+        text: String(record.plain ?? record.text ?? '').slice(0, 1000), time: Number(record.time) || 0,
+        eventAt: record.eventAt ?? null, receivedAt: record.receivedAt ?? record.time ?? null };
     }) };
   }
   async call({ key, scope, providerId = this.defaultProvider, operation, input = {}, approvalId, assertLive = () => {} }) {
@@ -172,11 +181,15 @@ export class MemoryProviderRuntime {
     const provider = this.providers.find(item => item.id === providerId);
     if (!provider || !provider.operations.includes(operation)) throw frameworkError('记忆提供者或操作不可用', 404);
     const normalized = normalizeMemoryInput(operation, input);
+    const temporal = temporalMetadata(operation === 'write' ? normalized.metadata : normalized.patch?.metadata);
+    if ((temporal || normalized.options?.temporal) && !provider.features.includes('temporal-v1')) throw frameworkError('此提供者未声明temporal-v1能力', 409);
+    if (temporal) this.validateTemporal(key, temporal);
     const payload = this.payload(key, operation, normalized);
     const payloadHash = permissionDigest(payload);
     const manifest = publicManifest(provider, operation);
     const check = () => {
       assertLive();
+      if (temporal) this.validateTemporal(key, temporal);
       if (permissionDigest(this.payload(key, operation, normalized)) !== payloadHash) throw frameworkError('待处理聊天记录已变化', 403);
     };
     const request = { protocol: MEMORY_PROTOCOL, operation, namespace: this.namespace(provider.id, key), input: payload,
@@ -186,6 +199,7 @@ export class MemoryProviderRuntime {
       currentManifest: () => { const current = this.providers.find(item => item.id === provider.id); return current ? publicManifest(current, operation) : {}; } });
     if (permit.pending) return permit.pending;
     if (this.inflight.size >= 4 || this.inflight.has(request.requestId)) { permit.finish('busy'); throw frameworkError('记忆服务正忙，请勿重复执行', 429); }
+    const ticket = this.onOperation({ phase: 'start', key, providerId, operation });
     let expired = false; let timer;
     const live = () => { if (expired) throw frameworkError('记忆服务调用已超时', 504); permit.check(); };
     const descriptor = { id: `memory.${provider.id}`, transport: provider.transport, timeoutMs: provider.timeoutMs, tool: provider.tools?.[operation] ?? provider.tool };
@@ -197,7 +211,9 @@ export class MemoryProviderRuntime {
       let result;
       try { result = normalizeResponse(raw, request, provider.id); }
       catch (error) { if (error?.statusCode === 400) throw frameworkError('记忆提供者返回不符合协议的数据', 502); throw error; }
+      if (operation === 'query') result.items = result.items.filter(item => !item.metadata?.temporal?.sources?.some(id => this.isSourceDeleted(key, id)));
       live(); permit.finish('completed');
+      this.onOperation({ phase: 'completed', key, providerId, operation, ticket, input: normalized, result });
       return result;
     } catch (error) {
       permit.finish(error?.statusCode === 403 ? 'revoked' : 'failed');

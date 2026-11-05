@@ -12,13 +12,14 @@ import { ExtensionPermissions } from '../src/framework/permissions.mjs';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 import { QQBridgeClient } from '../src/bridge-client.mjs';
 
-const installed = fss.existsSync(path.join(DEFAULT_SOURCE, 'lib/store.js'));
+const source = process.env.HAITANG_SOURCE || DEFAULT_SOURCE;
+const installed = fss.existsSync(path.join(source, 'lib/store.js'));
 const namespace = 'a'.repeat(64), other = 'b'.repeat(64);
 const request = (operation, input, ns = namespace) => ({ protocol: MEMORY_PROTOCOL, namespace: ns,
   requestId: crypto.createHash('sha256').update(JSON.stringify([ns, operation, input])).digest('hex'), operation, input });
 async function fixture(run) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-haitang-'));
-  const provider = new HaitangMemoryProvider({ directory });
+  const provider = new HaitangMemoryProvider({ directory, source });
   try { await run({ provider, directory }); }
   finally { await provider.close(); await fs.rm(directory, { recursive: true, force: true }); }
 }
@@ -45,7 +46,7 @@ test('data persists independently, clear stays scoped and ingest stores only sel
   await provider.handle(request('ingest', { messages }));
   await provider.handle(request('write', { text: '另一个群的记忆' }, other));
   await provider.close();
-  const restarted = new HaitangMemoryProvider({ directory });
+  const restarted = new HaitangMemoryProvider({ directory, source });
   try {
     const items = (await restarted.handle(request('query', {}))).items;
     assert.equal(items.length, 1); assert.equal(items[0].metadata.seq, 2);
@@ -69,7 +70,7 @@ test('malformed data, traversal and credentials are rejected without overwriting
 
 test('one namespace has a single live process owner and a second adapter cannot steal its lock', { skip: !installed }, () => fixture(async ({ provider, directory }) => {
   await provider.handle(request('write', { text: '锁测试' }));
-  const peer = new HaitangMemoryProvider({ directory });
+  const peer = new HaitangMemoryProvider({ directory, source });
   try { await assert.rejects(peer.handle(request('write', { text: '不能并发覆盖' })), /占用/); }
   finally { await peer.close(); }
   assert.equal((await provider.handle(request('query', {}))).items.length, 1);
@@ -90,7 +91,7 @@ test('automatic registration remains local and explicit deny or ask overrides it
 test('actual stdio provider works through the bridge with all operations automatic and still scopes tokens', { skip: !installed }, async () => {
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-haitang-mcp-'));
   const provider = { id: 'haitang', approvalMode: 'automatic', operations: ['query', 'write', 'update', 'delete', 'clear', 'ingest'],
-    transport: { type: 'stdio', command: process.execPath, args: [fileURLToPath(new URL('../integrations/haitang-memory.mjs', import.meta.url)), `--data=${data}`] }, tool: 'memory' };
+    transport: { type: 'stdio', command: process.execPath, args: [fileURLToPath(new URL('../integrations/haitang-memory.mjs', import.meta.url)), `--data=${data}`, `--upstream=${source}`] }, tool: 'memory' };
   const h = await bridgeHarness({ config: { ownerQQ: 123, dualMode: { enabled: true, ownerPreset: 'standard' },
     allow: { groups: ['456', '789'], private: ['123'] }, memory: { provider: 'haitang', providers: [provider] } } });
   await h.ensureSession('group:456'); await h.ensureSession('group:789');

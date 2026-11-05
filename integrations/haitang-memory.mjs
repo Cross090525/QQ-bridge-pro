@@ -6,6 +6,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { MEMORY_PROTOCOL, normalizeMemoryInput } from '../src/framework/memory-providers.mjs';
+import { temporalMetadata, selectTemporal } from '../src/core/temporal-memory.mjs';
 
 const RECORD = 'qq-bridge.haitang-entry/v1';
 const repo = fileURLToPath(new URL('..', import.meta.url));
@@ -71,8 +72,8 @@ export class HaitangMemoryProvider {
       const timestamps = new Map(raw.map(row => [row.id, row.ts]));
       const envelope = { protocol: MEMORY_PROTOCOL, namespace, requestId, operation };
       if (operation === 'query') {
-        let candidates = records.filter(item => (!input.category || item.category === input.category)
-          && (!input.member || item.subject === input.member) && (!item.expiresAt || item.expiresAt > Date.now()));
+        let candidates = selectTemporal(records, input.options).filter(item => (!input.category || item.category === input.category)
+          && (!input.member || item.subject === input.member));
         if (input.query.trim()) {
           // BM25/CJK fuzzy ranking is upstream code, not a bridge-side algorithm.
           const lookup = new Map(candidates.map(item => [item.id, item]));
@@ -86,6 +87,18 @@ export class HaitangMemoryProvider {
       let next = records.slice(); const affectedIds = [];
       const put = item => {
         normalizeMemoryInput('write', item);
+        const old = records.find(row => row.id === item.id), temporal = temporalMetadata(item.metadata);
+        if (old && JSON.stringify(old) === JSON.stringify(item)) return;
+        if (old && temporalMetadata(old.metadata)) throw new Error('时效记忆不可覆盖，请用新id和supersedes建立纠正历史');
+        if (temporal?.supersedes) {
+          const previous = records.find(row => row.id === temporal.supersedes);
+          if (!previous || !temporalMetadata(previous.metadata) || previous.subject !== item.subject || previous.category !== item.category
+              || temporal.validFrom == null || temporal.supersedes === item.id || (previous.metadata.temporal.validFrom != null && temporal.validFrom < previous.metadata.temporal.validFrom)) throw new Error('替代记忆须存在、对象类别一致并指定不早于旧值的生效时间');
+          if (records.some(row => row.id !== item.id && row.metadata?.temporal?.supersedes === temporal.supersedes)) throw new Error('旧记忆已被替代，请读取最新版本后纠正');
+          const closed = { ...previous, metadata: { ...previous.metadata, temporal: { ...previous.metadata.temporal,
+            validTo: Math.min(previous.metadata.temporal.validTo ?? Infinity, temporal.validFrom) } } };
+          next = next.map(row => row.id === previous.id ? closed : row); affectedIds.push(previous.id);
+        }
         // JSON-in-Markdown prevents a remembered "###" line from becoming a
         // forged second raw entry when the upstream Markdown parser reads it.
         if (upstream.detectSecrets(JSON.stringify(item)).length) throw new Error('内容疑似包含凭据，拒绝存入记忆');
@@ -98,7 +111,8 @@ export class HaitangMemoryProvider {
       }
       else if (operation === 'ingest') {
         for (const message of input.messages) put({ id: `msg-${crypto.createHash('sha256').update(JSON.stringify(message)).digest('hex').slice(0, 24)}`,
-          text: message.text, category: 'message', subject: message.userId ?? '', metadata: { messageId: message.messageId, sender: message.sender, seq: message.seq, eventAt: message.time, timeZone: 'Asia/Shanghai' } });
+          text: message.text, category: 'message', subject: message.userId ?? '', metadata: { messageId: message.messageId, sender: message.sender, seq: message.seq,
+            eventAt: message.eventAt ?? null, receivedAt: message.receivedAt ?? message.time, timeZone: 'Asia/Shanghai' } });
       } else if (operation === 'update') {
         for (const item of records.filter(item => this.matches(item, input.selector))) put({ ...item, ...input.patch });
       } else if (operation === 'delete' || operation === 'clear') {
@@ -109,6 +123,7 @@ export class HaitangMemoryProvider {
         });
       } else throw new Error('未知记忆操作');
       if (next.length > 10000 || Buffer.byteLength(JSON.stringify(next)) > 16 * 1024 * 1024) throw new Error('当前会话记忆存储容量已满');
+      if (!affectedIds.length) return { ...envelope, affectedIds: [], affectedCount: 0 };
       // A single upstream atomic replace commits the complete batch or none.
       const changed = new Set(affectedIds);
       await store.writeAtomic(upstream.RAW_FILE, upstream.serializeRaw(next.map(item => ({ id: item.id, ts: changed.has(item.id) ? upstream.nowStamp() : timestamps.get(item.id),

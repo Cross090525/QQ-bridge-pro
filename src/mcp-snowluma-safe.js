@@ -316,6 +316,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_send_content: 'contentSend',
   qq_context_query: 'contextQuery',
   qq_working_memory: 'contextQuery',
+  qq_task_memory: 'contextQuery',
   qq_time_resolve: 'contextQuery',
   qq_get_prompt: 'getPrompt',
   qq_get_unread_messages: 'getUnread',
@@ -953,7 +954,20 @@ server.tool('qq_memory', '通过开放记忆接口调用插件。query: query/me
   } catch (error) { return { content: [{ type: 'text', text: `记忆插件调用失败：${error.message}` }], isError: true }; }
 });
 
-server.tool('qq_time_resolve', '涉及相对日期必须使用：referenceTime为原消息发生时刻的Unix毫秒时间戳，不是记忆写入或更新时间；offsetDays为昨天=-1、今天=0、明天=1等日历日期偏移。返回明确日期及是否今天。缺少原消息时间先查询，不猜测。默认时区Asia/Shanghai；不解析钟点或周/月。', {
+server.tool('qq_task_memory', '读取和维护当前会话未完事项，不调度提醒、不授予发送权限。read: input可含query/status/offset/limit；update: revision、创建时text/ownerId/kind(continuation|bot_task|user_plan)、status(pending|in_progress|waiting|completed|cancelled)、waitingFor、dueAt(毫秒或null)、sources(已展示messages.id)。修改须带id，负责人不可变；完成/取消须有负责人的新来信依据，只表示用户报告。不要将随口一说建成任务。409时重读合并，已结束任务不重开。', {
+  key: z.string(), token: z.string().min(1), operation: z.enum(['read', 'update']), input: z.record(z.string(), z.unknown()).optional(),
+}, async ({ key, token, operation, input = {} }) => {
+  try {
+    const params = new URLSearchParams({ key });
+    for (const name of ['query','status','offset','limit']) if (input[name] !== undefined) params.set(name, String(input[name]));
+    const result = await agentApi('/api/v1/tasks' + (operation === 'read' ? '?' + params : ''), {
+      ...(operation === 'update' ? { method: 'POST', body: JSON.stringify({ ...input, key }) } : {}), headers: { 'x-agent-token': token },
+    });
+    return { content: [{ type: 'text', text: serializeModelData(result) }] };
+  } catch (error) { return { isError: true, content: [{ type: 'text', text: `任务记忆操作失败：${error.message}` }] }; }
+});
+
+server.tool('qq_time_resolve', '涉及相对日期必须使用：referenceTime优先取原消息eventAt（Unix毫秒），不是写入或更新时间；eventAt未知时可用receivedAt但须标记时间估计。offsetDays为昨天=-1、今天=0、明天=1等日历日期偏移。返回明确日期及是否今天。缺少原消息时间先查询，不猜测。默认时区Asia/Shanghai；不解析钟点或周/月。', {
   referenceTime: z.number().int().positive(), offsetDays: z.number().int().min(-36600).max(36600), timeZone: z.string().optional(),
 }, async input => {
   try { return {content:[{type:'text', text:JSON.stringify(resolveTime(input))}]}; }

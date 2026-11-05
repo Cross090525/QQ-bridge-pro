@@ -12,6 +12,7 @@ Connect QQ groups and private conversations to DeepSeek Harness (DSH). Agents re
 | --- | --- |
 | QQ messaging | Group/private routing, unread reads, quoted replies, waits, read watermarks, allowlists and pause controls |
 | Working context | Social v2 observes automatically and maintains scoped raw context, topics, media state and participation decisions. [Guide](docs/guides/WORKING_MEMORY.md) |
+| Temporal and task memory | Track fact validity and correction history, persist unfinished work, and manage related follow-ups in the console. [Guide](docs/guides/TEMPORAL_TASK_MEMORY.md) |
 | Usage quotas | One console for count/window rules, automatic renewal, early-reset approval and resumable work with a five-minute wait deadline. [Guide](docs/guides/USAGE_QUOTAS.md) |
 | On-demand context | Additional history, slang, persona and external long-term memory remain available through scoped queries |
 | Extension interfaces | Conversation-scoped API v1, dependency-free `QQBridgeClient`, external MCP/skill-runner examples |

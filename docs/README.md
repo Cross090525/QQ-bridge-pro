@@ -18,6 +18,7 @@
 | --- | --- |
 | 按需上下文、会话API v1、SDK、外部MCP / skill runner | [扩展接口](guides/EXTENSION_API.md) |
 | 自动感知、分群实时工作记忆与参与决策 | [实时工作记忆](guides/WORKING_MEMORY.md) |
+| 临时事实、改期历史、等待材料与未完事项管理 | [时效记忆与未完事项](guides/TEMPORAL_TASK_MEMORY.md) |
 | 调整接话尺度、单群覆盖、查看参与状态与记录 | [接话与参与管理](guides/PARTICIPATION.md) |
 | sourceId、固定内容服务、参数schema、媒体句柄与统一输出 | [内容服务框架](guides/CONTENT_FRAMEWORK.md) |
 | 精确能力授权、一次性审批、管理员QQ通知和私聊指令 | [扩展授权与审批](guides/EXTENSION_PERMISSIONS.md) |
