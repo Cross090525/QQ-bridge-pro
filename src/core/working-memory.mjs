@@ -3,13 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { normalizeAddressing, participationDecisionFields } from './participation.mjs';
+import { normalizeMessageFreshness, describeMessageFreshness } from './message-freshness.mjs';
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
 const copy = value => structuredClone(value);
 const str = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
 const LISTS = ['topics', 'facts', 'questions', 'uncertainties'];
 export class WorkingMemory {
-  constructor(directory, { now = Date.now, maxMessages = 500 } = {}) {
+  constructor(directory, { now = Date.now, maxMessages = 500, getFreshness = () => ({}), getReadThroughSeq = () => 0 } = {}) {
     this.directory = directory; this.now = now; this.maxMessages = maxMessages;
+    this.getFreshness = getFreshness; this.getReadThroughSeq = getReadThroughSeq;
     this.states = new Map(); this.receipts = new Map();
   }
   file(key) {
@@ -71,22 +73,36 @@ export class WorkingMemory {
     state.media = [...state.media.filter(m => m.sourceId !== sourceId), { ...old, ...patch, sourceId, updatedAt: this.now() }];
     this.save(key, state);
   }
+  annotate(key, messages) {
+    const options = { now: this.now(), policy: normalizeMessageFreshness(this.getFreshness()), readThroughSeq: this.getReadThroughSeq(key) };
+    return messages.map(message => describeMessageFreshness(message, options));
+  }
   snapshot(key, { recent = 20, maxChars = 10000, query = '', messageId = '' } = {}) {
     if (typeof query !== 'string' || query.length > 256 || typeof messageId !== 'string' || messageId.length > 120) fail('检索条件过长或无效');
     const state = this.get(key), now = this.now();
-    const matching = state.messages.filter(m => (!messageId || m.id === messageId)
+    const allMatching = this.annotate(key, state.messages).filter(m => (!messageId || m.id === messageId)
       && (!query || (m.sender + '\n' + m.text).toLowerCase().includes(query.toLowerCase())));
+    const explicitRecall = !!(query || messageId);
+    const matching = explicitRecall ? allMatching : allMatching.filter(message => message.contextEligible);
     const pending = matching.filter(m => !m.isSelf && !state.consideredIds.includes(m.id));
     const selectedIds = new Set(query || messageId ? matching.slice(-recent).map(m => m.id)
       : [...pending.slice(0, 12), ...matching.slice(-8)].map(m => m.id));
     const messages = matching.filter(m => selectedIds.has(m.id)).map(m => m.text.length > 1500
       ? { ...m, text: m.text.slice(0, 1200) + '\n…\n' + m.text.slice(-200), excerpt: true } : m);
     if (messageId && messages[0]) { messages[0] = copy(matching.find(m => m.id === messageId)); }
+    const mediaContexts = new Map(matching.flatMap(message => message.media.map(ref => [ref.sourceId, message])));
+    const media = state.media.filter(item => mediaContexts.has(item.sourceId)).slice(-20).map(item => {
+      const source = mediaContexts.get(item.sourceId);
+      return { ...item, sourceMessageId: source.id, historical: source.historical, stale: source.stale,
+        replyEligible: source.replyEligible, contextRole: source.contextRole };
+    });
     const packet = { revision: state.revision, updatedAt: state.updatedAt || null,
       topics: state.topics.map(t => ({ ...t, status: t.status === 'active' && now - (t.lastEvidenceAt ?? t.updatedAt) > 3600000 ? 'dormant' : t.status })),
       facts: state.facts, questions: state.questions, uncertainties: state.uncertainties,
-      decision: state.decision && { ...state.decision, historical: true, stale: matching.some(m => !m.isSelf && m.time > state.decision.updatedAt) }, media: state.media.slice(-20), messages,
+      decision: state.decision && { ...state.decision, historical: true, stale: matching.some(m => !m.isSelf && m.time > state.decision.updatedAt) }, media, messages,
       pendingCount: pending.length, evictedPending: state.evictedPending, totalMessages: state.messages.length, matchedMessages: matching.length,
+      historicalPendingCount: allMatching.filter(m => !m.contextEligible && !m.isSelf && !state.consideredIds.includes(m.id)).length,
+      historyOmittedCount: explicitRecall ? 0 : allMatching.length - matching.length,
       truncated: matching.length > messages.length || messages.some(m => m.excerpt) };
     // Reserve the oldest pending source, then spend the remaining budget on context.
     const anchor = !query && !messageId ? pending[0]?.id : null;

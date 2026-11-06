@@ -1,4 +1,5 @@
 // Conversation relationships come from gateway segments, never from quoted text.
+import { normalizeMessageFreshness, describeMessageFreshness } from './message-freshness.mjs';
 const userId = value => /^[1-9]\d{0,15}$/.test(String(value ?? '')) ? String(value) : null;
 export function normalizeAddressing(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -89,8 +90,9 @@ const audienceOf = message => {
   return 'unknown';
 };
 export class ParticipationManager {
-  constructor({ getState, getConfig = () => ({}), now = Date.now }) {
+  constructor({ getState, getConfig = () => ({}), getMessages, getFreshness = () => ({}), now = Date.now }) {
     this.getState = getState; this.getConfig = getConfig; this.now = now; this.live = new Map();
+    this.getMessages = getMessages; this.getFreshness = getFreshness;
   }
   session(key) {
     const state = this.getState(key);
@@ -119,6 +121,10 @@ export class ParticipationManager {
     const actual = received.map(audienceOf);
     const audience = actual.includes('direct') ? 'direct' : actual.length && actual.every(x => x === 'other') ? 'other' : decision.audience || 'unknown';
     live.plan = { action: decision.action, audience, intent: decision.intent || 'answer', sources: [...decision.sources],
+      currentEvidence: evidence.some(message => Object.hasOwn(message, 'replyEligible'))
+        ? evidence.filter(message => message.replyEligible && !message.isSelf).map(message => ({
+          id: message.id, seq: message.seq, eventAt: message.eventAt, receivedAt: message.receivedAt, time: message.time,
+        })) : null,
       at: this.now(), seq: Math.max(0, ...live.seen), policy: JSON.stringify(this.policy(key)) };
     this.remember(key, decision.action, decision.action === 'reply' || audience === 'other' ? audience : decision.action, decision.sources);
   }
@@ -158,13 +164,37 @@ export class ParticipationManager {
       ...(history ? { history: state.participation.history.map(x => ({ ...x, reasonText: PARTICIPATION_REASONS[x.reason] })) } : {}),
       guidance: participationContext(key, policy).guidance + '\n' + summary };
   }
-  assertSend(key) {
+  assertReplyTarget(key, targetId, state, plan) {
+    if (targetId == null || String(targetId).trim() === '') return;
+    const id = String(targetId).trim();
+    const policy = normalizeMessageFreshness(this.getFreshness());
+    const messages = this.getMessages ? this.getMessages(key) : state.recentMessages || [];
+    const options = { now: this.now(), readThroughSeq: state.lastReadThroughSeq || 0, policy };
+    const reintroduced = messages.some(message => {
+      const context = describeMessageFreshness(message, options);
+      return !message.isSelf && !context.stale && String(message.replyToMessageId || '') === id
+        && (context.replyEligible || plan?.currentEvidence?.some(source => source.id === message.id));
+    });
+    if (reintroduced) return;
+    const target = messages.find(message => String(message.messageId || '') === id || message.id === `qq:${id}`);
+    if (!target || describeMessageFreshness(target, options).stale) {
+      throw Object.assign(new Error('引用目标已过回复时限或缺少可核验时间，请针对当前来信重新判断；用户重新引用旧消息后可以继续'), { statusCode: 409 });
+    }
+  }
+  assertSend(key, { replyToMessageId } = {}) {
     if (!String(key).startsWith('group:')) return;
     const { state, live } = this.session(key), plan = live.plan;
+    this.assertReplyTarget(key, replyToMessageId, state, plan);
     // Legacy callers without a structured decision retain their existing behavior.
     if (!plan) return;
     if (this.now() - plan.at > 5 * 60000) throw Object.assign(new Error('接话决策已过期，请重新读取上下文并更新decision'), { statusCode: 409 });
     if (plan.action !== 'reply') throw Object.assign(new Error('当前参与决策为观察或补充上下文，请先更新reply决策再发送'), { statusCode: 409 });
+    if (plan.currentEvidence !== null) {
+      const options = { now: this.now(), policy: normalizeMessageFreshness(this.getFreshness()) };
+      if (!plan.currentEvidence.some(message => !describeMessageFreshness(message, options).stale)) {
+        throw Object.assign(new Error('决策依据只有历史参考或已过回复时限，请读取当前来信并更新decision，勿补回旧话'), { statusCode: 409 });
+      }
+    }
     const newer = (state.recentMessages || []).filter(m => !m.isSelf && m.seq > plan.seq);
     const changedPolicy = plan.policy !== JSON.stringify(this.policy(key));
     if (changedPolicy || newer.some(m => !live.seen.has(m.seq))) {

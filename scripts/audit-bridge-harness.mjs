@@ -30,6 +30,7 @@ import * as participation from '../src/core/participation.mjs';
 import { WorkingMemory, ObservationQueue, observationServices } from '../src/core/working-memory.mjs';
 import { TaskMemory } from '../src/core/task-memory.mjs';
 import { TemporalRecall } from '../src/core/temporal-recall.mjs';
+import { normalizeMessageFreshness, MESSAGE_FRESHNESS_GUIDANCE } from '../src/core/message-freshness.mjs';
 import * as publicApi from '../src/core/public-api.mjs';
 import * as frameworkContent from '../src/framework/content.mjs';
 import { FrameworkMediaStore } from '../src/framework/media-store.mjs';
@@ -193,7 +194,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...dualMode, ...contextQuery, selectRelevantSlang, SlangReferenceStore, ...participation, ...publicApi, WorkingMemory, ObservationQueue, observationServices,
-    ...frameworkContent, FrameworkMediaStore, ContentServiceRuntime, ...extensionPermissionsModule, MemoryProviderRuntime, TaskMemory, TemporalRecall, ...memoryCompat, DebateTasks, handleDebateApi, projectDebateContext,
+    ...frameworkContent, FrameworkMediaStore, ContentServiceRuntime, ...extensionPermissionsModule, MemoryProviderRuntime, TaskMemory, TemporalRecall, normalizeMessageFreshness, MESSAGE_FRESHNESS_GUIDANCE, ...memoryCompat, DebateTasks, handleDebateApi, projectDebateContext,
     DebateRequests, normalizeDebateWake, ManagedDebateWorkers, spawn: () => { throw Error('fixture forbids real worker spawning'); },
     DshDebateAnalyzer, UsageQuotas: class extends UsageQuotas { constructor(options) { super({ ...options, waitMs: 0 }); } }, normalizeQuotaConfig, QUOTA_RESOURCES,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的

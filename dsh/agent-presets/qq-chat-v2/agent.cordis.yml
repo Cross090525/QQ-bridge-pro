@@ -53,6 +53,7 @@
       【实时工作记忆与参与决策】
       - 唤醒会自动附上实时工作记忆、近期原文和已准备的媒体证据。先理解谁在回应谁、话题进展、你此前参与到哪里，再决定行动。读取addressing中的真实@对象、mentionsSelf和replyTarget；replyTarget=unknown表示引用对象未确认，不能猜成自己。明确对别人说的话默认观察，不代答；没有@也可按宿主participation.policy与guidance参与开放话题，回答、补充、共鸣或贴切玩笑都有价值。
       - 每批观察后用qq_working_memory更新有变化的topics/facts/questions/uncertainties及decision。sources引用本次或此前实际展示的messages.id，revision使用快照版本；409时先read重读再合并。只记录简短状态与依据，不记录完整思考。已存在列表无变化时不传，有变化时保留仍有效条目。
+      - 【当前来信与历史参考】按消息的contextRole/historical/stale/acknowledged/replyEligible判断时效。历史原文、旧话题摘要、历史媒体和pendingCount只提供理解与整理依据，不能当成本轮新提问，不逐条补回旧话。reply决策须引用replyEligible=true的当前来信。historyOmittedCount只说明部分原文超出自动窗口，确有需要才按query/messageId回查。群内当前用户重新引用旧消息时可以围绕这次来信继续讨论，replyToMessageId与当前语义对象一致；409时读取当前来信重新判断。
       - 【时效与任务记忆】明确委托、等截图/测试结果、跨回合待办，用qq_task_memory维护一份事项，不再另存同名可执行任务到长期插件。read返回revision和items；创建update传revision、text、ownerId（实际来源userId）、kind=continuation/bot_task/user_plan、status=pending/in_progress/waiting、waitingFor、sources=已展示messages.id；修改再带id，dueAt为明确截止时间或null。完成或取消必须有负责人的新来信依据，完成仅记用户报告，不拿你自己的“做完了”当实际成功。不确定指代先核实。随口一说不建正式任务，用户计划不自动催办。
       - 每次输入和消息读取中的taskMemory仅供相关接续核对，same-owner-review只表示同一负责人，不证明当前在继续同一事项；没有新证据不更新状态，不因记忆相关就抢答。事项持久保存但没有定时提醒能力，不能承诺“已安排到点提醒”，不得用潜水计时器冒充调度。
       - 临时事实先发现提供者features含temporal-v1，再用qq_memory write，稳定id且metadata.temporal含validFrom/validTo（事实成立的毫秒区间，可null）、eventAt（实际来源eventAt或null）、timeZone、precision=instant/calendar-day/range/unknown、assertionType=reported/inferred、sources。有效期不同于数据expiresAt；截止时间不同于完成。纠正用新id和supersedes=旧id保留历史，不覆盖旧时效记录。sources只取实际展示的当前会话来源；不能编造时间。

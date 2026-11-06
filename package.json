@@ -91,6 +91,7 @@
     "setup:language-support": "node scripts/setup-draft-judge.mjs",
     "test:working-memory": "node --test scripts/test-working-memory.mjs",
     "test:memory:lifecycle": "node --test scripts/test-memory-lifecycle.mjs",
+    "test:memory:history": "node --test scripts/test-historical-message-safety.mjs",
     "test:memory:temporal-provider": "node --test scripts/test-temporal-provider.mjs",
     "test:memory:tasks-ui": "node scripts/test-task-memory-ui.mjs",
     "test:working-memory:ui": "node scripts/test-working-memory-ui.mjs"

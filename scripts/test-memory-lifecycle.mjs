@@ -12,7 +12,7 @@ import { QQBridgeClient } from '../src/bridge-client.mjs';
 import { startMemoryProvider } from '../examples/memory-provider.mjs';
 const KEY = 'group:456';
 function temporary(t) { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-lifecycle-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true })); return dir; }
-function source(n, text = '测试材料', extra = {}) { return { id: `qq:${n}`, seq: n, userId: '234', sender: '成员', plain: text, time: n, ...extra }; }
+function source(n, text = '测试材料', extra = {}) { return { id: `qq:${n}`, seq: n, userId: '234', sender: '成员', plain: text, time: Date.now(), ...extra }; }
 const fact = (id, from = 100, to = 200, more = {}) => ({ id, text: '本周临时出差', subject: '234', metadata: { temporal: {
   validFrom: from, validTo: to, eventAt: null, timeZone: 'Asia/Shanghai', precision: 'range', sources: ['qq:1'], assertionType: 'reported', ...more } } });
 
@@ -43,7 +43,7 @@ test('discard immediately revokes receipts, rejects late batches and remains rev
 
 test('unchanged items keep stable IDs and times, assistant claims cannot confirm user facts', t => {
   let now = 100; const wm = new WorkingMemory(temporary(t), {now:()=>now});
-  wm.record(KEY,source(1)); wm.record(KEY,source(2,'机器人的推断',{isSelf:true})); wm.offered(KEY,wm.snapshot(KEY));
+  wm.record(KEY,source(1,'测试材料',{time:now})); wm.record(KEY,source(2,'机器人的推断',{isSelf:true,time:now})); wm.offered(KEY,wm.snapshot(KEY));
   const item = {text:'旧话题',status:'active',certainty:'reported',sources:['qq:1']};
   wm.update(KEY,{revision:0,topics:[item]}); const old = wm.get(KEY).topics[0]; now += 3600001;
   wm.update(KEY,{revision:1,topics:[old,{...item,text:'新话题'}]});
@@ -146,7 +146,8 @@ test('gateway event time survives delayed delivery independently from receipt ti
   const {h,client}=await fixture(t);
   const eventTime=Math.floor(Date.now()/1000)-86400;
   await h.handleIncoming('group',456,{self_id:999,user_id:234,group_id:456,message_id:99,time:eventTime,sender:{nickname:'成员'},message:[{type:'text',data:{text:'明天测试'}}]},h.cfg);
-  const m=(await client.workingContext()).snapshot.messages.find(m=>m.id==='qq:99');
+  assert.ok(!(await client.workingContext()).snapshot.messages.some(m=>m.id==='qq:99'));
+  const m=(await client.workingContext({messageId:'qq:99'})).snapshot.messages[0];
   assert.equal(m.eventAt,eventTime*1000); assert.ok(m.receivedAt>m.eventAt); assert.equal(m.time,m.receivedAt);
 });
 

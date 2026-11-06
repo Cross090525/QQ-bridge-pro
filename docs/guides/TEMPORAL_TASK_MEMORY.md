@@ -8,7 +8,9 @@
     "workingMemory": {
       "enabled": true,
       "tasksEnabled": true,
-      "temporalRecall": true
+      "temporalRecall": true,
+      "replyMaxAgeMs": 1800000,
+      "historyMaxAgeMs": 7200000
     }
   }
 }
@@ -88,6 +90,16 @@ Bridge 对已经获准的提供者读写结果建立短期、只读的本地投�
 
 ## 来源与删除
 
+### 当前来信与历史参考
+
+消息使用原事件时间计算年龄，缺失时依次采用接收时间和兼容时间字段。模型可见的快照、近期消息、未读和等待响应带有 `historical`、`stale`、`acknowledged`、`replyEligible`、`contextRole`。已确认处理的消息标为历史参考。默认超过 30 分钟的来信失去自动回复资格，超过两小时的原文及关联媒体退出自动唤醒。显式 `query/messageId` 回查仍可查看保留的历史原文及其标记。
+
+`historyOmittedCount` 统计本次自动快照排除的旧原文，`historicalPendingCount` 表示窗口外仍待整理的历史原文。`pendingCount` 属于记忆理解进度，历史原文可按需要整理。当前来信及其实际交流对象决定是否回复。自动媒体处理遵循同样的来信时效。
+
+普通群聊的结构化 reply 决策需要当前有效来信作为依据，队列临近实际发送时重新检查依据年龄。引用目标超过回复窗口或缺少可核验时间时返回 409。当前有效来信的真实 `replyToMessageId` 重新引用了该旧消息时，可继续围绕本次来信讨论。历史回查授予来源可读性，发言仍须满足当前参与判断。
+
+可通过 `socialV2.workingMemory.replyMaxAgeMs`、`historyMaxAgeMs` 调整时间窗口，范围为一分钟至七天，回复窗口须小于等于自动上下文窗口。控制台保存观察设置会保留这两个配置。设置更新对后续快照和发送检查生效。已有 DSH 历史中的原文由后续输入规则与发送检查共同约束。
+
 唤醒、unread、recent、wait、工作记忆读取统一登记实际展示来源，返回规范 `messages.id`。一次参与 decision 确认自上次 decision 以来实际交付的消息批次；来源引用集合另行保留，历史摘要来源不会仅因被引用就冒充新交付。会话退役或重启后阅读回执失效，必须重新读取。
 
 长消息积压优先保留最早待处理来源，保证在无新消息时持续推进；`evictedPending` 统计容量淘汰的未处理原文，不能将其称作已理解。结构化条目有稳定 ID，未变化条目保留证据/更新时间。confirmed 用户事实拒绝仅由机器人自述支持；这仍不能替代模型对转述、引用、玩笑和主体的正确理解。
@@ -98,6 +110,7 @@ Bridge 对已经获准的提供者读写结果建立短期、只读的本地投�
 
 ```sh
 npm run test:memory:lifecycle
+npm run test:memory:history
 npm run test:memory:temporal-provider
 npm run test:memory:tasks-ui
 npm run test:working-memory
