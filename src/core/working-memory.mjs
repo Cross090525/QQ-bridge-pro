@@ -9,9 +9,10 @@ const copy = value => structuredClone(value);
 const str = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
 const LISTS = ['topics', 'facts', 'questions', 'uncertainties'];
 export class WorkingMemory {
-  constructor(directory, { now = Date.now, maxMessages = 500, getFreshness = () => ({}), getReadThroughSeq = () => 0 } = {}) {
+  constructor(directory, { now = Date.now, maxMessages = 500, getFreshness = () => ({}), getReadThroughSeq = () => 0, getMemoryProgress = () => ({}) } = {}) {
     this.directory = directory; this.now = now; this.maxMessages = maxMessages;
     this.getFreshness = getFreshness; this.getReadThroughSeq = getReadThroughSeq;
+    this.getMemoryProgress = getMemoryProgress;
     this.states = new Map(); this.receipts = new Map();
   }
   file(key) {
@@ -21,14 +22,20 @@ export class WorkingMemory {
   get(key) {
     const file = this.file(key);
     if (!this.states.has(key)) {
-      let state = { version: 1, revision: 0, messages: [], media: [], topics: [], facts: [], questions: [], uncertainties: [], consideredIds: [], deletedIds: [], evictedPending: 0, decision: null };
+      let state = { version: 1, revision: 0, messages: [], media: [], topics: [], facts: [], questions: [], uncertainties: [], consideredIds: [], deletedIds: [], evictedPending: 0,
+        modelSeenIds: [], memoryReviews: [], evictedUnreviewed: 0, reviewTrackingStartedAt: this.now(), decision: null };
       if (fs.existsSync(file)) {
         try {
           const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
           if (saved.version !== 1 || !Number.isSafeInteger(saved.revision) || !Array.isArray(saved.messages)
             || !Array.isArray(saved.media) || LISTS.some(k => !Array.isArray(saved[k]))) throw Error();
-          state = { consideredIds: [], deletedIds: [], evictedPending: 0, ...saved };
-          if (!Array.isArray(state.deletedIds)) throw Error();
+          state = { consideredIds: [], deletedIds: [], evictedPending: 0, modelSeenIds: [], memoryReviews: [], evictedUnreviewed: 0, reviewTrackingStartedAt: this.now(), ...saved };
+          if (!Array.isArray(state.deletedIds) || !Array.isArray(state.modelSeenIds) || state.modelSeenIds.length > this.maxMessages
+              || state.modelSeenIds.some(id => typeof id !== 'string') || new Set(state.modelSeenIds).size !== state.modelSeenIds.length
+              || !Array.isArray(state.memoryReviews) || state.memoryReviews.length > this.maxMessages
+              || state.memoryReviews.some(item => typeof item.id !== 'string' || !['no_memory','candidates_staged'].includes(item.outcome) || !Number.isSafeInteger(item.reviewedAt))
+              || new Set(state.memoryReviews.map(item => item.id)).size !== state.memoryReviews.length
+              || !Number.isSafeInteger(state.evictedUnreviewed) || state.evictedUnreviewed < 0 || !Number.isSafeInteger(state.reviewTrackingStartedAt)) throw Error();
         } catch { fail('实时工作记忆无法读取，保留原文件；请恢复备份', 503); }
       }
       this.states.set(key, state);
@@ -55,11 +62,18 @@ export class WorkingMemory {
       receivedAt: Number(message.receivedAt ?? message.time) || this.now(),
       eventAt: Number.isSafeInteger(message.eventAt) && message.eventAt > 0 ? message.eventAt : null,
       media: (message.content || []).filter(c => c.sourceId).slice(0, 20).map(c => ({ sourceId: c.sourceId, type: c.type })) });
-    state.evictedPending += state.messages.slice(0, Math.max(0, state.messages.length - this.maxMessages))
+    const evicted = state.messages.slice(0, Math.max(0, state.messages.length - this.maxMessages));
+    state.evictedPending += evicted
       .filter(m => !m.isSelf && !state.consideredIds.includes(m.id)).length;
+    if (evicted.length) {
+      const progress = this.reviewProgress(key, state);
+      state.evictedUnreviewed += evicted.filter(message => !message.isSelf && !progress.byId.get(message.id)?.reviewed).length;
+    }
     state.messages = state.messages.slice(-this.maxMessages);
     const retained = new Set(state.messages.map(m => m.id));
     state.consideredIds = state.consideredIds.filter(id => retained.has(id));
+    state.modelSeenIds = state.modelSeenIds.filter(id => retained.has(id));
+    state.memoryReviews = state.memoryReviews.filter(item => retained.has(item.id));
     const sources = new Set(state.messages.flatMap(m => m.media.map(x => x.sourceId)));
     state.media = state.media.filter(m => sources.has(m.sourceId));
     state.updatedAt = this.now(); this.save(key, state);
@@ -77,19 +91,51 @@ export class WorkingMemory {
     const options = { now: this.now(), policy: normalizeMessageFreshness(this.getFreshness()), readThroughSeq: this.getReadThroughSeq(key) };
     return messages.map(message => describeMessageFreshness(message, options));
   }
+  reviewProgress(key, state = this.get(key)) {
+    const messages = state.messages.filter(message => !message.isSelf), ids = messages.map(message => message.id);
+    let candidates = {}, candidateStateAvailable = true;
+    try { candidates = this.getMemoryProgress(key, ids); } catch { candidateStateAvailable = false; }
+    const reviews = new Map(state.memoryReviews.map(item => [item.id, item]));
+    const seen = new Set(state.modelSeenIds), considered = new Set(state.consideredIds), byId = new Map();
+    const positions = new Map(state.messages.map((message, index) => [message.id, index]));
+    for (const message of messages) {
+      const entry = candidates[message.id] ?? { candidateCount: 0, verifiedCount: 0 }, review = reviews.get(message.id);
+      const noMemory = candidateStateAvailable && review?.outcome === 'no_memory' && entry.candidateCount === 0;
+      const reviewed = noMemory || candidateStateAvailable && review?.outcome === 'candidates_staged' && entry.candidateCount > 0;
+      const verified = reviewed && entry.candidateCount > 0 && entry.candidateCount === entry.verifiedCount;
+      byId.set(message.id, { ...entry, seen: seen.has(message.id), considered: considered.has(message.id), reviewed, noMemory, verified,
+        status: verified ? 'verified' : noMemory ? 'no_memory' : reviewed ? 'candidates_staged' : 'unreviewed',
+        retentionRemainingMessages: this.maxMessages - state.messages.length + positions.get(message.id) + 1 });
+    }
+    const values = [...byId.values()];
+    return { byId, summary: { candidateStateAvailable, totalSources: messages.length, seenSources: values.filter(item => item.seen).length,
+      consideredSources: values.filter(item => item.considered).length, reviewedSources: values.filter(item => item.reviewed).length,
+      noMemorySources: values.filter(item => item.noMemory).length, candidateSources: values.filter(item => item.candidateCount > 0).length,
+      verifiedSources: values.filter(item => item.verified).length, pendingReview: values.filter(item => !item.reviewed).length,
+      atRisk: values.filter(item => !item.reviewed && item.retentionRemainingMessages <= Math.max(1, Math.ceil(this.maxMessages / 5))).length,
+      evictedUnreviewed: state.evictedUnreviewed, trackingSince: state.reviewTrackingStartedAt } };
+  }
   snapshot(key, { recent = 20, maxChars = 10000, query = '', messageId = '' } = {}) {
     if (typeof query !== 'string' || query.length > 256 || typeof messageId !== 'string' || messageId.length > 120) fail('检索条件过长或无效');
     const state = this.get(key), now = this.now();
+    const progress = this.reviewProgress(key, state);
     const allMatching = this.annotate(key, state.messages).filter(m => (!messageId || m.id === messageId)
       && (!query || (m.sender + '\n' + m.text).toLowerCase().includes(query.toLowerCase())));
     const explicitRecall = !!(query || messageId);
     const matching = explicitRecall ? allMatching : allMatching.filter(message => message.contextEligible);
     const pending = matching.filter(m => !m.isSelf && !state.consideredIds.includes(m.id));
+    const unreviewed = matching.filter(message => progress.byId.has(message.id) && !progress.byId.get(message.id).reviewed);
     const selectedIds = new Set(query || messageId ? matching.slice(-recent).map(m => m.id)
-      : [...pending.slice(0, 12), ...matching.slice(-8)].map(m => m.id));
+      : [...pending.slice(0, 12), ...unreviewed.slice(0, 6), ...matching.slice(-8)].map(m => m.id));
     const messages = matching.filter(m => selectedIds.has(m.id)).map(m => m.text.length > 1500
       ? { ...m, text: m.text.slice(0, 1200) + '\n…\n' + m.text.slice(-200), excerpt: true } : m);
     if (messageId && messages[0]) { messages[0] = copy(matching.find(m => m.id === messageId)); }
+    for (const message of messages) if (progress.byId.has(message.id)) {
+      const entry = progress.byId.get(message.id);
+      if (entry.reviewed || entry.retentionRemainingMessages <= Math.max(1, Math.ceil(this.maxMessages / 5))) {
+        message.memoryStatus = entry.status; message.retentionRemainingMessages = entry.retentionRemainingMessages;
+      }
+    }
     const mediaContexts = new Map(matching.flatMap(message => message.media.map(ref => [ref.sourceId, message])));
     const media = state.media.filter(item => mediaContexts.has(item.sourceId)).slice(-20).map(item => {
       const source = mediaContexts.get(item.sourceId);
@@ -101,11 +147,15 @@ export class WorkingMemory {
       facts: state.facts, questions: state.questions, uncertainties: state.uncertainties,
       decision: state.decision && { ...state.decision, historical: true, stale: matching.some(m => !m.isSelf && m.time > state.decision.updatedAt) }, media, messages,
       pendingCount: pending.length, evictedPending: state.evictedPending, totalMessages: state.messages.length, matchedMessages: matching.length,
+      memoryProgress: progress.summary,
+      memoryReviewQueue: { historical: true, replyEligible: false, contextRole: 'reference-only',
+        sourceIds: state.messages.filter(message => progress.byId.has(message.id) && !progress.byId.get(message.id).reviewed).slice(0, 5).map(message => message.id),
+        note: '待整理来源编号，仅供记忆维护；需要时显式回查，当前来信决定发言。' },
       historicalPendingCount: allMatching.filter(m => !m.contextEligible && !m.isSelf && !state.consideredIds.includes(m.id)).length,
       historyOmittedCount: explicitRecall ? 0 : allMatching.length - matching.length,
       truncated: matching.length > messages.length || messages.some(m => m.excerpt) };
     // Reserve the oldest pending source, then spend the remaining budget on context.
-    const anchor = !query && !messageId ? pending[0]?.id : null;
+    const anchor = !query && !messageId ? pending[0]?.id ?? unreviewed[0]?.id : null;
     while (JSON.stringify(packet).length > maxChars && packet.messages.length > 1) {
       const removable = packet.messages.findIndex(m => m.id !== anchor && !pending.slice(0, 12).some(p => p.id === m.id));
       packet.messages.splice(removable >= 0 ? removable : packet.messages.length - 1, 1); packet.truncated = true;
@@ -150,6 +200,9 @@ export class WorkingMemory {
     for (const k of LISTS) for (const item of packet[k]) for (const id of item.sources) receipt.ids.add(id);
     for (const m of packet.media) if (m.status === 'understood' || preparedSources.includes(m.sourceId)) receipt.media.add(m.sourceId);
     const current = this.get(key);
+    const shownIds = packet.messages.filter(message => current.messages.some(raw => raw.id === message.id && !raw.isSelf) && !current.deletedIds.includes(message.id)).map(message => message.id);
+    const modelSeenIds = [...new Set([...current.modelSeenIds, ...shownIds])];
+    if (modelSeenIds.length !== current.modelSeenIds.length) this.save(key, { ...current, modelSeenIds });
     // Visual batches can include sources outside the bounded textual snapshot.
     // Acknowledge exactly the evidence attached by the bridge, still scoped to
     // prepared media belonging to this conversation.
@@ -159,13 +212,24 @@ export class WorkingMemory {
     receipt.batch = receipt.batch.filter(id => current.messages.some(m => m.id === id) && !current.deletedIds.includes(id));
   }
   update(key, input) {
-    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !['revision', ...LISTS, 'decision', 'media', 'discardMessageIds'].includes(k))) fail('实时记忆更新参数无效');
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !['revision', ...LISTS, 'decision', 'media', 'discardMessageIds', 'memoryReview'].includes(k))) fail('实时记忆更新参数无效');
     const state = copy(this.get(key)), receipt = this.receipts.get(key);
     if (input.revision !== state.revision) fail('实时记忆版本已变化，请重新读取', 409);
     const evidence = value => {
       this.requireEvidence(key, value);
       return [...new Set(value)];
     };
+    if (input.memoryReview !== undefined) {
+      const review = input.memoryReview;
+      if (!review || Object.keys(review).some(field => !['sources','outcome'].includes(field)) || !['no_memory','candidates_staged'].includes(review.outcome)) fail('整理回执需要sources与no_memory或candidates_staged');
+      const sources = evidence(review.sources), progress = this.getMemoryProgress(key, sources);
+      if (sources.some(id => !state.messages.some(message => message.id === id && !message.isSelf))) fail('整理回执须引用已展示的用户原文');
+      if (sources.some(id => review.outcome === 'candidates_staged' ? !progress[id]?.candidateCount : progress[id]?.candidateCount > 0)) fail('整理结论与当前候选记录不一致', 409);
+      state.memoryReviews = [...state.memoryReviews.filter(item => !sources.includes(item.id)), ...sources.map(id => {
+        const old = state.memoryReviews.find(item => item.id === id && item.outcome === review.outcome);
+        return { id, outcome: review.outcome, reviewedAt: old?.reviewedAt ?? this.now() };
+      })];
+    }
     for (const k of LISTS) if (input[k] !== undefined) {
       if (!Array.isArray(input[k]) || input[k].length > (k === 'topics' ? 5 : 10)) fail('实时记忆条目过多');
       const previous = state[k];
@@ -210,6 +274,8 @@ export class WorkingMemory {
       for (const k of LISTS) state[k] = state[k].filter(x => !x.sources.some(id => ids.has(id)));
       if (state.decision?.sources.some(id => ids.has(id))) state.decision = null;
       state.consideredIds = state.consideredIds.filter(id => !ids.has(id));
+      state.modelSeenIds = state.modelSeenIds.filter(id => !ids.has(id));
+      state.memoryReviews = state.memoryReviews.filter(item => !ids.has(item.id));
       state.deletedIds = [...new Set([...state.deletedIds, ...ids])];
     }
     state.revision++; state.updatedAt = this.now(); this.save(key, state);

@@ -955,13 +955,13 @@ server.tool('qq_memory', '通过开放记忆接口调用插件。query: query/me
   } catch (error) { return { content: [{ type: 'text', text: `记忆插件调用失败：${error.message}` }], isError: true }; }
 });
 
-server.tool('qq_memory_consolidate', '可靠整理当前会话普通事实。read列出候选，input可含status/offset/limit。stage需要text(归纳事实)、subject(实际userId)、category、assertion(self_report或inferred)、sources:[{id:已展示messages.id,quote:该消息原文短片段}]，可选providerId。引用片段只保存在本机，提供者收到归纳事实和来源指纹。先查重，纠错时stage另带supersedes与expectedHash(旧记录memoryRecordHash，query结果recordHash)。commit/verify/reject需要id与revision，可带approvalId。commit后状态unknown须verify，核验为applied才算落库；unknown不可直接重试commit。409时read重读，approval_required遵循管理审批。候选仅供维护，不是本轮来信或发言授权。需consolidation-v1提供者。', {
+server.tool('qq_memory_consolidate', '可靠整理当前会话普通事实。read列出候选，input可含status/offset/limit/archived(布尔)。已归档候选仍参与去重和精确核验，短引用已清理。stage需要text(归纳事实)、subject(实际userId)、category、assertion(self_report或inferred)、sources:[{id:已展示messages.id,quote:该消息原文短片段}]，可选providerId。引用片段只保存在本机，提供者收到归纳事实和来源指纹。先查重，纠错时stage另带supersedes与expectedHash(旧记录memoryRecordHash，query结果recordHash)。commit/verify/reject需要id与revision，可带approvalId。commit后状态unknown须verify，核验为applied才算落库；unknown不可直接重试commit。409时read重读，approval_required遵循管理审批。候选仅供维护，不是本轮来信或发言授权。需consolidation-v1提供者。', {
   key: z.string(), token: z.string().min(1), operation: z.enum(['read','stage','commit','verify','reject']),
   input: z.record(z.string(), z.unknown()).optional(),
 }, async ({ key, token, operation, input = {} }) => {
   try {
     const params = new URLSearchParams({ key });
-    for (const field of ['status','offset','limit']) if (input[field] !== undefined) params.set(field, String(input[field]));
+    for (const field of ['status','offset','limit','archived']) if (input[field] !== undefined) params.set(field, String(input[field]));
     const result = await agentApi('/api/v1/memory/consolidation' + (operation === 'read' ? '?' + params : ''), {
       ...(operation === 'read' ? {} : { method: 'POST', body: JSON.stringify({ key, operation, input }) }),
       headers: { 'x-agent-token': token }, timeoutMs: 200000,
@@ -990,7 +990,7 @@ server.tool('qq_time_resolve', '涉及相对日期必须使用：referenceTime�
   catch (error) { return {isError:true, content:[{type:'text',text:error.message}]}; }
 });
 
-server.tool('qq_working_memory', '读取或更新当前群的实时工作记忆。read返回snapshot，input可用query关键词或messageId=messages.id回看原文；update须带revision。发现NSFW时用discardMessageIds:[已展示的messages.id]清除近期缓存、未读及关联工作状态，每次最多10条。topics/facts/questions/uncertainties为完整替换列表，每项{text,status:active|dormant|resolved,certainty:reported|confirmed|inferred,sources:实际展示的messages.id数组}。media为[{sourceId,summary}]，仅总结已看到证据的媒体。decision为{action:observe|need_context|reply,note:简短依据,sources}，不保存完整思考；reply不自动发送。先按addressing判断实际@与引用对象，普通群消息和对别人说的话默认观察；媒体未知不是要求你发言。', {
+server.tool('qq_working_memory', '读取或更新当前群的实时工作记忆。read返回snapshot，input可用query关键词或messageId=messages.id回看原文；update须带revision。memoryProgress区分已展示、已判断、已整理、候选与已核验来源，memoryReviewQueue是历史维护编号。每批整理后用memoryReview:{sources:[实际展示的用户messages.id],outcome:no_memory或candidates_staged}确认；candidates_staged须已创建候选，no_memory用于经核对无需新增记忆且无候选的来源。候选不可用或写入失败时保留待整理，不以no_memory代替失败。不要仅因decision=observe就宣称整理完成，不凭来源编号推断原文。发现NSFW时用discardMessageIds:[已展示的messages.id]清除近期缓存、未读及关联工作状态，每次最多10条。topics/facts/questions/uncertainties为完整替换列表，每项{text,status:active|dormant|resolved,certainty:reported|confirmed|inferred,sources:实际展示的messages.id数组}。media为[{sourceId,summary}]，仅总结已看到证据的媒体。decision为{action:observe|need_context|reply,note:简短依据,sources}，不保存完整思考；reply不自动发送。先按addressing判断实际@与引用对象，普通群消息和对别人说的话默认观察；媒体未知不是要求你发言。', {
   key: z.string(), token: z.string().min(1), operation: z.enum(['read', 'update']),
   input: z.record(z.string(), z.unknown()).optional(),
 }, async ({ key, token, operation, input }) => {

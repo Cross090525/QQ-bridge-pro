@@ -42,23 +42,31 @@ try {
   await panel.getByRole('button', { name: '核验存储', exact: true }).first().click();
   await page.waitForFunction(() => document.querySelector('#memoryCandidatesList p')?.textContent.startsWith('已核验'));
   assert.equal(h.memoryConsolidation.list('group:456').items[0].status, 'applied');
+  await panel.getByRole('button', { name: '归档本地记录', exact: true }).first().click();
+  await page.locator('#memoryCandidatesMsg').filter({ hasText: '共 21 项' }).waitFor();
+  await page.locator('#memoryCandidatesArchived').check();
+  await page.locator('#memoryCandidatesMsg').filter({ hasText: '共 1 项' }).waitFor();
+  assert.match(await page.locator('#memoryCandidatesList').textContent(), /归档已清理短引用/);
+  assert.equal(h.memoryConsolidation.list('group:456', { archived: true }).items[0].evidence.length, 0);
+  await page.locator('#memoryCandidatesArchived').uncheck();
+  await page.locator('#memoryCandidatesMsg').filter({ hasText: '共 21 项' }).waitFor();
   await panel.getByRole('button', { name: '拒绝候选', exact: true }).first().click();
-  await page.waitForFunction(() => document.querySelectorAll('#memoryCandidatesList p')[1]?.textContent.startsWith('已拒绝'));
+  await page.waitForFunction(() => document.querySelector('#memoryCandidatesList p')?.textContent.startsWith('已拒绝'));
   await page.locator('#memoryCandidatesNext').click();
-  await page.waitForFunction(() => document.querySelectorAll('#memoryCandidatesList .memory-section').length === 2);
+  await page.waitForFunction(() => document.querySelectorAll('#memoryCandidatesList .memory-section').length === 1);
   await page.locator('#memoryCandidatesPrevious').click();
   await page.waitForFunction(() => document.querySelectorAll('#memoryCandidatesList .memory-section').length === 20);
   await page.locator('#memoryCandidatesKey').fill('789');
   await panel.getByRole('button', { name: '清理本地记录', exact: true }).first().click();
   await page.locator('#memoryCandidatesMsg').filter({ hasText: '已变化' }).waitFor();
-  assert.equal(h.memoryConsolidation.list('group:456').total, 22); assert.equal(h.memoryConsolidation.list('group:789').total, 0);
+  assert.equal(h.memoryConsolidation.list('group:456').total, 21); assert.equal(h.memoryConsolidation.list('group:789').total, 0);
   await page.locator('#memoryCandidatesLoad').click(); await page.locator('#memoryCandidatesMsg').filter({ hasText: '共 0 项' }).waitFor();
   await page.locator('#memoryCandidatesKey').fill('456'); await page.locator('#memoryCandidatesFilter').selectOption('rejected');
   await page.locator('#memoryCandidatesMsg').filter({ hasText: '共 1 项' }).waitFor();
   await panel.getByRole('button', { name: '清理本地记录', exact: true }).click();
   await page.locator('#memoryCandidatesMsg').filter({ hasText: '共 0 项' }).waitFor();
   const screenshot = process.argv.find(value => value.startsWith('--screenshot='))?.slice(13);
-  if (screenshot) { await page.locator('#memoryCandidatesFilter').selectOption(''); await page.locator('#memoryCandidatesMsg').filter({ hasText: '共 21 项' }).waitFor(); await panel.screenshot({ path: screenshot }); }
+  if (screenshot) { await page.locator('#memoryCandidatesFilter').selectOption(''); await page.locator('#memoryCandidatesMsg').filter({ hasText: '共 20 项' }).waitFor(); await panel.screenshot({ path: screenshot }); }
   assert.deepEqual(errors, []); assert.equal(h.workingMemory.receipts.size, 0); assert.equal(h.calls.sent.length, 0);
   console.log('PASS memory candidates UI: local evidence, commit, verify, reject, cleanup, pagination, scope changes, escaped text, no read receipts or QQ sends');
 } finally {

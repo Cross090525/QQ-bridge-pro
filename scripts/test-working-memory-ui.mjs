@@ -36,6 +36,8 @@ try {
   assert.ok((await page.locator('#workingMemoryOutput').textContent()).includes('<img src=x'));
   assert.equal(await page.locator('#workingMemoryKey').inputValue(), 'group:456');
   assert.equal(h.workingMemory.receipts.size, 0, 'admin preview is not a model visibility receipt');
+  assert.match(await page.locator('#workingMemorySummary').textContent(), /记忆整理：已展示 0/);
+  assert.equal(h.workingMemory.get('group:456').modelSeenIds.length, 0);
   assert.equal(await page.locator('#observationIntervalSeconds').inputValue(), '60');
   await page.locator('#observationIntervalSeconds').fill('120');
   for (const enabled of [false, true]) {

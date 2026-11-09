@@ -2264,7 +2264,7 @@ button:active:not(:disabled) {
 <details class="settings-group" id="memoryCandidatesPanel"><summary>记忆候选与写入核验</summary><div class="settings-content">
 <p class="meta">查看 Agent 已提取的普通事实及本地来源片段。提交后请核验，结果未知时先核验。纠错由新候选保留旧版本，提供者需启用 consolidation-v1。</p>
 <div class="row"><input id="memoryCandidatesKey" placeholder="group:群号 / private:QQ号" style="flex:1"><button id="memoryCandidatesLoad" class="small">加载候选</button><span id="memoryCandidatesMsg" class="meta" role="status"></span></div>
-<div class="row"><select id="memoryCandidatesFilter"><option value="">所有状态</option><option value="pending">待写入</option><option value="approval_required">待审批</option><option value="unknown">结果待核验</option><option value="applied">已核验</option><option value="conflict">冲突</option><option value="rejected">已拒绝</option><option value="invalidated">来源已删除</option></select><button id="memoryCandidatesPrevious" class="small">上一页</button><button id="memoryCandidatesNext" class="small">下一页</button></div>
+<div class="row"><select id="memoryCandidatesFilter"><option value="">所有状态</option><option value="pending">待写入</option><option value="approval_required">待审批</option><option value="unknown">结果待核验</option><option value="applied">已核验</option><option value="conflict">冲突</option><option value="rejected">已拒绝</option><option value="invalidated">来源已删除</option></select><label style="width:auto"><input type="checkbox" id="memoryCandidatesArchived" style="width:auto"> 查看归档</label><button id="memoryCandidatesPrevious" class="small">上一页</button><button id="memoryCandidatesNext" class="small">下一页</button></div>
 <div id="memoryCandidatesList">加载后查看候选、来源和写入状态。</div>
 </div></details>
 <details class="settings-group" id="taskMemoryPanel"><summary>未完事项与任务记忆</summary><div class="settings-content">
@@ -3867,7 +3867,7 @@ async function loadCandidates(reset = true) {
   try {
     const key = candidateKey();
     if (reset) candidateOffset = 0;
-    const params = new URLSearchParams({ key, status: document.getElementById('memoryCandidatesFilter').value, offset: candidateOffset });
+    const params = new URLSearchParams({ key, status: document.getElementById('memoryCandidatesFilter').value, offset: candidateOffset, archived: document.getElementById('memoryCandidatesArchived').checked });
     const r = await api('/api/socialV2/memory-consolidation?' + params);
     if (generation !== candidateGeneration || key !== candidateKey()) return;
     if (!r.ok) throw new Error(r.error || '加载失败');
@@ -3877,8 +3877,9 @@ async function loadCandidates(reset = true) {
       const card = document.createElement('div'); card.className = 'memory-section';
       const title = document.createElement('p'); title.textContent = `${candidateLabels[item.status]} · ${item.providerId} · ${item.record.text}`;
       const detail = document.createElement('pre');
+      const sources = item.archived ? item.record.metadata.qqBridgeConsolidation.sources : item.evidence;
       detail.textContent = `${item.id} · 主体 ${item.record.subject} · ${item.record.category} · ${item.record.metadata.qqBridgeConsolidation.assertion}\n` +
-        item.evidence.map(source => `${source.id} · ${source.userId} · ${new Date(source.eventAt ?? source.receivedAt).toLocaleString()}\n${source.quote}`).join('\n') +
+        sources.map(source => `${source.id} · ${source.userId} · ${new Date(source.eventAt ?? source.receivedAt).toLocaleString()}\n${source.quote ?? '归档已清理短引用，保留来源指纹'}`).join('\n') +
         (item.record.metadata.qqBridgeConsolidation.supersedes ? `\n纠正 ${item.record.metadata.qqBridgeConsolidation.supersedes}` : '');
       card.append(title, detail);
       const approval = document.createElement('input'); approval.placeholder = '批准后的 approvalId（需要时填写）';
@@ -3887,7 +3888,10 @@ async function loadCandidates(reset = true) {
       if (['pending','approval_required'].includes(item.status)) actions.push(['commit','提交写入']);
       if (['unknown','applied','conflict'].includes(item.status)) actions.push(['verify','核验存储']);
       if (['pending','approval_required','conflict'].includes(item.status)) actions.push(['reject','拒绝候选']);
-      if (['applied','rejected','invalidated'].includes(item.status)) actions.push(['remove','清理本地记录']);
+      if (['applied','rejected','invalidated'].includes(item.status)) {
+        if (!item.archived) actions.push(['archive','归档本地记录']);
+        actions.push(['remove','清理本地记录']);
+      }
       for (const [operation, label] of actions) {
         const button = document.createElement('button'); button.className = 'small'; button.textContent = label;
         button.addEventListener('click', async () => {
@@ -3909,12 +3913,12 @@ async function loadCandidates(reset = true) {
     if (!r.items.length) box.textContent = '当前筛选没有候选';
     document.getElementById('memoryCandidatesPrevious').disabled = candidateOffset === 0;
     document.getElementById('memoryCandidatesNext').disabled = candidateNextOffset == null;
-    msg.textContent = `共 ${r.total} 项`;
+    msg.textContent = `共 ${r.total} 项 · 归档 ${r.archiveTotal || 0} 项`;
   } catch (error) { if (generation === candidateGeneration) msg.textContent = error.message; }
 }
 document.getElementById('memoryCandidatesLoad').addEventListener('click', () => loadCandidates());
 document.getElementById('memoryCandidatesKey').addEventListener('input', () => { candidateGeneration++; candidateOffset = 0; candidateNextOffset = null; });
-document.getElementById('memoryCandidatesFilter').addEventListener('change', () => loadCandidates());
+for (const id of ['memoryCandidatesFilter','memoryCandidatesArchived']) document.getElementById(id).addEventListener('change', () => loadCandidates());
 document.getElementById('memoryCandidatesPrevious').addEventListener('click', () => { candidateOffset = Math.max(0, candidateOffset - 20); loadCandidates(false); });
 document.getElementById('memoryCandidatesNext').addEventListener('click', () => { if (candidateNextOffset != null) { candidateOffset = candidateNextOffset; loadCandidates(false); } });
 let loadedTaskKey = null, taskRevision = null, taskSelection = undefined, taskOffset = 0, taskNextOffset = null;
@@ -4029,6 +4033,11 @@ document.getElementById('workingMemoryLoad').addEventListener('click', async () 
       '未完成问题：' + (s.questions.filter(q => q.status !== 'resolved').map(q => q.text).join('；') || '暂无记录'),
       '媒体：' + s.media.length + ' 条记录，其中已理解 ' + s.media.filter(m => m.status === 'understood').length + ' 条',
       '待判断的新消息：' + s.pendingCount + ' 条',
+      ...(s.memoryProgress ? [
+        ...(s.memoryProgress.candidateStateAvailable === false ? ['候选状态暂不可读，整理进度待核实'] : []),
+        `记忆整理：已展示 ${s.memoryProgress.seenSources} / 已判断 ${s.memoryProgress.consideredSources} / 已整理 ${s.memoryProgress.reviewedSources} / 有候选 ${s.memoryProgress.candidateSources} / 已核验 ${s.memoryProgress.verifiedSources}`,
+        `待整理 ${s.memoryProgress.pendingReview} 条，临近淘汰 ${s.memoryProgress.atRisk} 条；跟踪以来未整理即淘汰 ${s.memoryProgress.evictedUnreviewed} 条`
+      ] : []),
       '上次决策：' + (actions[s.decision?.action] || '尚未判断') + (s.decision?.note ? '，' + s.decision.note : '')].join('\n')
     : (r.error || '无法读取当前记忆');
   msg.textContent = '已加载 ' + key;

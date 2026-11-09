@@ -38,7 +38,7 @@
 
 1. `commit` 提交固定内容和稳定事实 ID。执行前持久化 `writing`。
 2. 收到写入响应后进入 `unknown`，再调用 `verify` 精确查询该 ID。
-3. 内容指纹一致才成为 `applied`。精确查询确认为缺失时回到 `pending`，随后可再次 `commit`。内容不同进入 `conflict`，重读并调查后决定拒绝或另建纠错。
+3. 内容指纹一致才成为 `applied`。首次写入尚未核验成功且核验历史明确的候选，精确查询确认为缺失时回到 `pending`，随后可再次 `commit`。曾经核验成功的记录后来消失，进入 `conflict` 等待核对，避免用写入重试恢复已被删除的记忆。旧版候选缺少历史核验标记时，缺失结果也进入冲突核对。内容不同同样进入 `conflict`，重读并调查后决定拒绝或另建纠错。
 4. `approval_required` 表示请求尚待执行。在现有权限面板批准后，携带返回的 `approval.approval.requestId` 作为 `input.approvalId` 重试相同操作。核验本身也可能需要审批。
 
 超时、响应无效或进程在 `writing` 阶段中断都进入 `unknown`，应先核验。相同稳定 ID 的完全相同重试由适配器处理为无变化。409 表示版本或状态冲突，应先 `read` 获取当前候选。`read` 支持 `status/offset/limit`，每页最多 20 条。`reject` 适用于 pending、approval_required 和 conflict。结果未知须先核验。
@@ -57,11 +57,19 @@ SDK 提供 `client.memoryCandidates(params)` 和 `client.consolidateMemory(opera
 
 默认 query 在分页前过滤被替代的记录。`options.consolidation.history=true` 显示所有仍在存储中的历史记录，包括过期记录。核验使用 `options.consolidation={id:目标ID,history:true}`，适配器必须精确筛选后分页，结果缺失才可表示不存在。历史完整查询与时效按时间查询分别使用对应选项。
 
-通过 Bridge 发起任何提供者变更时，该会话、提供者的既有 applied 候选会转为待核验，以免清空后的本地去重回执继续声称事实已存在。直接修改插件存储后，可在管理界面手动核验。
+通过 Bridge 发起提供者变更时，只将可能受影响的既有 applied 候选转为待核验。带 ID 的 write 检查该 ID 和纠错目标，update/delete 按原记录匹配 selector，clear 按类别或整个会话处理。无 ID 的 write 保守覆盖同主体、同类别，ingest 按整个会话处理。在途精确核验也遵循相同失效范围，受影响的晚到结果会被撤销。直接修改插件存储后，可在管理界面手动核验。
+
+## 候选维护与归档
+
+自动上下文轮转选择最多三条待维护候选，包含需要重新核验的归档记录。在成功投递或返回给模型后推进轮转，重复构建预览与投递失败会保留当前顺序。轮转只影响展示顺序，整理回执与模型来源阅读凭据分别管理。进程重启后重新开始轮转。
+
+管理员可以在控制台归档 applied、rejected 或 invalidated 条目。归档清理本地短引用，保留归纳记录、稳定 ID、来源指纹和去重指纹。归档后仍可核验，也参与 sourceProgress 和去重。提供者记录与本地归档通过同一会话与提供者关联。来源删除后，归档同样失效并清除事实文本。
+
+GET 的 `archived=true` 可以分页读取归档，默认读取活动区。SDK 使用 `client.memoryCandidates({archived:true})`，Agent 的 read input 也接受 archived 布尔值。手动 archive 与 remove 使用管理端身份。活动区满时，新候选可以在一次原子保存中把一条已结束记录移入归档，再新增候选。
 
 ## 保存与删除
 
-每会话最多 100 个未结束候选、200 个总候选。容量满时明确报错，由管理员整理。损坏的候选文件会保留并拒绝覆盖。旧长期记忆沿用原有格式读取，升级无需批量重写。
+每会话的活动区最多 100 个未结束候选、200 个总条目，另有最多 1000 条有界归档。归档记录受变更影响时，也可以进入待核验状态。容量满时明确报错，由管理员整理，待处理事项继续保留。旧版 version 1 文件缺少 archive 时按空归档读取。损坏的候选文件会保留并拒绝覆盖。旧长期记忆沿用原有格式读取，升级无需批量重写。
 
 删除工作来源时，关联候选失效，本地引用片段与事实文本清除，晚到结果不能恢复候选。提供者查询会按删除来源过滤这些记录。提供者中的物理记录仍需使用现有 delete/clear 删除，备份也需按实际保留策略管理。
 
@@ -70,3 +78,5 @@ SDK 提供 `client.memoryCandidates(params)` 和 `client.consolidateMemory(opera
 ## 验证
 
 `npm run test:memory:consolidation` 覆盖原文淘汰后恢复、来源校验、审批、重启、超时、精确核验、并发、容量、来源删除、受保护纠错和 HTTP/SDK。安装了 Haitang 上游时也运行真实适配器测试。`npm run test:memory:consolidation-ui` 使用隔离服务和无头浏览器检查管理操作、分页、范围切换与文本转义。
+
+`npm run test:memory:maintenance` 覆盖精确失效、在途核验、候选轮转、归档及其容量、去重和来源删除，以及工作记忆的独立整理进度。

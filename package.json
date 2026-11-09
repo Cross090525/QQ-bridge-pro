@@ -94,6 +94,7 @@
     "test:memory:history": "node --test scripts/test-historical-message-safety.mjs",
     "test:memory:temporal-provider": "node --test scripts/test-temporal-provider.mjs",
     "test:memory:consolidation": "node --test scripts/test-memory-consolidation.mjs",
+    "test:memory:maintenance": "node --test scripts/test-memory-maintenance.mjs",
     "test:memory:consolidation-ui": "node scripts/test-memory-consolidation-ui.mjs",
     "test:onebot-recovery": "node --test scripts/test-onebot-recovery.mjs scripts/test-snowluma-upstream-health.mjs",
     "test:wake-silence": "node --test scripts/test-wake-silence.mjs scripts/test-quota-continuation.mjs scripts/test-wake-coalescing.mjs",

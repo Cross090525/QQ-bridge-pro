@@ -63,7 +63,7 @@ test('interrupted writes become unknown, require exact verification and never bl
   assert.equal(verified.item.status, 'applied');
   restarted.invalidateReceipts(KEY, 'local', 'clear');
   const absent = await action(restarted, restarted.list(KEY).items[0], 'verify', async () => ({ items: [], nextCursor: null }));
-  assert.equal(absent.item.status, 'pending');
+  assert.equal(absent.item.status, 'conflict');
 });
 
 test('approvals do not claim success and timeout results remain verifiable without duplicate records', async t => {
