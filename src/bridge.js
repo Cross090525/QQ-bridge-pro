@@ -1496,7 +1496,7 @@ async function main() {
     return quotaBudgets.get(id);
   }
   extensionPermissions.quotaContext = key => ({ budget: quotaBudget(key), signal: requestContext.getStore()?.signal });
-  async function consumeUsage(key, resource, legacy = []) {
+  async function consumeUsage(key, resource, legacy = [], { onWait = () => {} } = {}) {
     const context = requestContext.getStore();
     if (context?.quotaNotice) return { check() {} };
     const budget = quotaBudget(key), policy = sessionPolicy(key);
@@ -1504,7 +1504,8 @@ async function main() {
       context?.assertLive?.();
       if (!isSessionAllowedInCurrentMode(key) || sessionPolicy(key) !== policy || (modeFor(key) === 'reserved2' && (socialV2.paused || cfg.socialV2?.enabled === false))) throw frameworkError('等待额度的会话授权已变化', 403);
     };
-    try { return await usageQuotas.waitFor(() => usageQuotas.consume(key, resource, { legacy }), { budget, assertLive, signal: context?.signal, onWait: () => {
+    try { return await usageQuotas.waitFor(() => usageQuotas.consume(key, resource, { legacy }), { budget, assertLive, signal: context?.signal, onWait: error => {
+      onWait({ startedAt: budget.deadline - usageQuotas.waitMs, deadline: budget.deadline, resetsAt: error.resetsAt ?? null });
       const unit = context?.mediaQuota;
       if (!unit || budget.recordedDeadline === budget.deadline) return;
       budget.recordedDeadline = budget.deadline;
@@ -5285,6 +5286,11 @@ async function main() {
             }
             for (const option of ['replyMaxAgeMs', 'historyMaxAgeMs']) if (body.workingMemory[option] !== undefined) merged.workingMemory[option] = body.workingMemory[option];
             normalizeMessageFreshness(merged.workingMemory);
+            if (body.workingMemory.observationIntervalMs !== undefined) {
+              const interval = body.workingMemory.observationIntervalMs;
+              if (!Number.isSafeInteger(interval) || interval < 0 || interval > 600000) throw frameworkError('观察间隔须为0至600000毫秒');
+              merged.workingMemory.observationIntervalMs = interval;
+            }
           }
           if (merged.autoReplyCheckMs !== undefined) {
             const n = Number(merged.autoReplyCheckMs);
@@ -5681,7 +5687,11 @@ async function main() {
             unreadCount: st.unread.length,
             recentCount: st.recentMessages.length,
             lastWakeReason: st.lastWakeReason,
-            lastAiReplyAt: st.lastAiReplyAt
+            lastAiReplyAt: st.lastAiReplyAt,
+            busyReason: isConversationBusyV2(key, st) || st.wakeQuotaWaiting ? busyReasonV2(key, st) : null,
+            wakeQuotaWait: st.wakeQuotaWait ?? null,
+            pendingWakeAt: st.pendingWakeAt ?? null,
+            pendingWakeReason: st.pendingWakeReason ?? null
           });
           return;
         }
@@ -6014,7 +6024,10 @@ async function main() {
               recentCount: st.recentMessages.length,
               lastWakeReason: st.lastWakeReason,
               lastAiReplyAt: st.lastAiReplyAt,
-              noActionCount: st.wakeConfig.noActionCount || 0
+              noActionCount: st.wakeConfig.noActionCount || 0,
+              wakeQuotaWait: st.wakeQuotaWait ?? null,
+              pendingWakeAt: st.pendingWakeAt ?? null,
+              pendingWakeReason: st.pendingWakeReason ?? null
             });
           }
           sendJson({ ok: true, conversations: list });
@@ -11054,6 +11067,10 @@ async function main() {
       return;
     }
     const st = getSocialV2State(key);
+    if (st.pendingWakeTimer && isPassiveObservationV2(st.pendingWakeReason) && !isPassiveObservationV2(reason)) {
+      clearTimeout(st.pendingWakeTimer); st.pendingWakeTimer = null;
+      st.pendingWakeReason = null; st.pendingWakeAt = null;
+    }
     // 防重入：如果该会话已经有一个 DSH turn 在进行中（AI 正在思考/调用工具），
     // 或已有排队/在途 prompt，则不再投递新的候选唤醒，避免“思维链进行中又塞入一个 question 唤醒”。
     if (isConversationBusyV2(key, st) || st.wakeQuotaWaiting) {
@@ -11091,12 +11108,17 @@ async function main() {
     st.preSleepWaitObservedAt = 0;
     st.preSleepWaitAccumMs = 0;
     cancelReplyCheckV2(key); // 本次唤醒已接管，清理仍在排队的回复检查
-    const wakeTime = now;
     st.wakeQuotaWaiting = true;
-    try { await consumeUsage(key, 'model.wake'); } catch (error) {
+    st.wakeQuotaWait = null;
+    try { await consumeUsage(key, 'model.wake', [], { onWait: info => {
+      if (!st.wakeQuotaWait) log(`[reserved2] 等待模型唤醒额度 ${key}，等待截止 ${new Date(info.deadline).toISOString()}`);
+      st.wakeQuotaWait = info;
+    } }); } catch (error) {
       if (error.code === 'QUOTA_EXHAUSTED') { appendActivity(`${key} observation quota paused`); return; }
       throw error;
-    } finally { st.wakeQuotaWaiting = false; }
+    } finally { st.wakeQuotaWaiting = false; st.wakeQuotaWait = null; }
+    if (socialV2.conversations.get(key) !== st || socialV2.paused || cfg.socialV2?.enabled === false || modeFor(key) !== 'reserved2') return;
+    const wakeTime = Date.now();
     st.wakeTimes.push(wakeTime);
     if (st.wakeTimes.length > 200) st.wakeTimes = st.wakeTimes.slice(-200);
     // 无论提前唤醒还是超时唤醒，都清理有限潜水定时器与 sleepUntil，避免状态残留/重复唤醒
@@ -11107,7 +11129,7 @@ async function main() {
       st.sleepTimer = null;
     }
     st.wakeConfig.sleepUntil = null;
-    st.wakeConfig.lastWakeAt = now;
+    st.wakeConfig.lastWakeAt = wakeTime;
     st.wakeConfig.wakeCount = (st.wakeConfig.wakeCount || 0) + 1;
     st.lastWakeReason = reason;
     saveSocialV2State();
@@ -11184,6 +11206,7 @@ async function main() {
 
   /** 会话此刻算忙的具体原因（只用于日志，避免排查时只能反复重启加猜）。 */
   function busyReasonV2(key, st) {
+    if (st?.wakeQuotaWaiting) return 'quotaWait';
     if (st?.pendingWakeTimer) return 'pendingWakeTimer';
     if (pendingWakeKeys.has(key)) return 'pendingWakeKey';
     const q = promptQueues.get(key);
@@ -11247,6 +11270,10 @@ async function main() {
     return TIMER_WAKE_REASONS.has(String(reason ?? '').split(':')[0]);
   }
 
+  function isPassiveObservationV2(reason) {
+    return ['observation', 'observationContinuation'].includes(reason);
+  }
+
   function scheduleWakeV2(key, reason) {
     if (modeFor(key) !== 'reserved2') return;
     if (cfg.socialV2?.enabled === false) return;
@@ -11263,7 +11290,9 @@ async function main() {
         st.pendingWakeReason = reason;
         log(`[reserved2] 合并窗口内升级唤醒原因 ${key}: ${cur} -> ${reason}`);
       }
-      return;
+      if (isPassiveObservationV2(cur) && !isPassiveObservationV2(reason)) {
+        clearTimeout(st.pendingWakeTimer); st.pendingWakeTimer = null;
+      } else return;
     }
     if (isConversationBusyV2(key, st) || st.wakeQuotaWaiting) {
       if (!Array.isArray(st.pendingWakeReasons)) st.pendingWakeReasons = [];
@@ -11289,11 +11318,21 @@ async function main() {
       st.sleepTimer = null;
     }
     st.pendingWakeReason = reason;
-    const batchMs = reason === 'observation' || reason === 'mediaReady' ? 3000 : Math.max(1000, Number(st.wakeConfig?.batchWindowMs) || 8000);
+    let batchMs = reason === 'observation' || reason === 'mediaReady' ? 3000 : Math.max(1000, Number(st.wakeConfig?.batchWindowMs) || 8000);
+    const interval = cfg.socialV2?.workingMemory?.observationIntervalMs ?? 60000;
+    if (key.startsWith('group:') && isPassiveObservationV2(reason) && Number.isSafeInteger(interval) && interval >= 0 && interval <= 600000) {
+      batchMs = Math.max(batchMs, (Number(st.wakeConfig.lastWakeAt) || 0) + interval - Date.now());
+    }
+    st.pendingWakeAt = Date.now() + batchMs;
     st.pendingWakeTimer = setTimeout(() => {
       st.pendingWakeTimer = null;
+      st.pendingWakeAt = null;
       const finalReason = st.pendingWakeReason || reason;
       st.pendingWakeReason = null;
+      if (isPassiveObservationV2(finalReason) && (!workingEnabled() || workingMemory.snapshot(key).pendingCount === 0)) {
+        log(`[reserved2] 跳过已处理的观察批次 ${key}`);
+        return;
+      }
       void sendWakePromptV2(key, finalReason).catch((error) => log(`[reserved2] 计划唤醒异常 ${key}:`, error?.message ?? error));
     }, batchMs);
     // 与其它 per-conversation 定时器保持一致：别让一个待唤醒定时器把进程钉住不退出。
@@ -11435,6 +11474,7 @@ async function main() {
       st.pendingWakeTimer = null;
     }
     st.pendingWakeReason = null;
+    st.pendingWakeAt = null;
     if (st.sleepTimer) {
       clearTimeout(st.sleepTimer);
       st.sleepTimer = null;

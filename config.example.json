@@ -122,7 +122,7 @@
     "longGapMaxMs": 10000
   },
   "socialV2": {
-    "workingMemory": { "enabled": true, "tasksEnabled": true, "temporalRecall": true },
+    "workingMemory": { "enabled": true, "tasksEnabled": true, "temporalRecall": true, "observationIntervalMs": 60000 },
     "enabled": true,
     "autoReplyCheckMs": 30000,
     "agentPreset": "qq-chat-v2",

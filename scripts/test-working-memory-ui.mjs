@@ -36,14 +36,27 @@ try {
   assert.ok((await page.locator('#workingMemoryOutput').textContent()).includes('<img src=x'));
   assert.equal(await page.locator('#workingMemoryKey').inputValue(), 'group:456');
   assert.equal(h.workingMemory.receipts.size, 0, 'admin preview is not a model visibility receipt');
+  assert.equal(await page.locator('#observationIntervalSeconds').inputValue(), '60');
+  await page.locator('#observationIntervalSeconds').fill('120');
   for (const enabled of [false, true]) {
     await page.locator('#workingMemoryEnabled').setChecked(enabled);
     const saved = page.waitForResponse(r => r.url().endsWith('/api/socialV2/config') && r.request().method() === 'POST');
     await page.locator('#workingMemorySave').click(); assert.equal((await saved).status(), 200);
     assert.equal(JSON.parse(fs.readFileSync(path.join(h.temp, 'config.json'))).socialV2.workingMemory.enabled, enabled);
+    assert.equal(h.cfg.socialV2.workingMemory.observationIntervalMs, 120000);
   }
+  const wakeState = h.getSocialV2State('group:456');
+  wakeState.wakeQuotaWaiting = true;
+  wakeState.wakeQuotaWait = { startedAt: Date.now(), deadline: Date.now() + 300000, resetsAt: Date.now() + 3600000 };
+  const wakeButton = page.locator('#v2WakeStatusLoad');
+  for (const details of await wakeButton.locator('xpath=ancestor::details').all()) if (await details.getAttribute('open') === null) await details.locator(':scope > summary').click();
+  await page.locator('#v2WakeKey').fill('group:456'); await wakeButton.click();
+  await page.locator('#v2WakeStatusOutput').filter({ hasText: '正在等待模型唤醒额度' }).waitFor();
+  wakeState.wakeQuotaWaiting = false; wakeState.wakeQuotaWait = null;
+  wakeState.wakeConfig.lastWakeAt = Date.now(); h.scheduleWakeV2('group:456', 'observation');
+  await wakeButton.click(); await page.locator('#v2WakeStatusOutput').filter({ hasText: '待执行批次' }).waitFor();
   const screenshot = process.argv.find(v => v.startsWith('--screenshot='))?.split('=', 2)[1];
   if (screenshot) await panel.screenshot({ path: screenshot });
   assert.deepEqual(errors, []); assert.equal(h.calls.sent.length, 0);
-  console.log('PASS real working-memory console: scoped view, escaped content, live switch, durable save, no QQ sends');
+  console.log('PASS real working-memory console: scoped view, escaped content, live switch, observation interval, quota wait and batching status, durable save, no QQ sends');
 } finally { await browser?.close(); server.closeAllConnections(); await new Promise(r => server.close(r)); await h.close(); }

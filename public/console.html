@@ -2256,6 +2256,7 @@ button:active:not(:disabled) {
 <p class="meta">持续理解近期聊天、媒体与话题，再决定是否发言。每个群独立保存；长期记忆仍使用下方提供者。</p>
 <div class="row"><label style="display:flex;align-items:center;gap:8px;flex:1;width:auto"><input type="checkbox" id="workingMemoryEnabled" style="width:auto;flex:none"> 自动观察与实时工作记忆</label><button id="workingMemorySave" class="small">保存观察设置</button></div>
 <div class="row" style="flex-wrap:wrap"><label style="width:auto"><input id="taskMemoryEnabled" type="checkbox" style="width:auto"> 未完事项与自动接续</label><label style="width:auto"><input id="temporalRecallEnabled" type="checkbox" style="width:auto"> 本地时效记忆匹配</label></div>
+<label for="observationIntervalSeconds">普通群消息观察间隔（秒）</label><div class="row"><input id="observationIntervalSeconds" type="number" min="0" max="600" step="1" value="60" style="width:100px;flex:0 0 100px"><span class="meta" style="flex-grow:1">沉默观察也消耗模型唤醒额度。默认60秒合并，明确触发按原有短窗口处理。</span></div>
 <div class="row"><input id="workingMemoryKey" type="text" placeholder="直接输入群号，或 group:群号 / private:QQ号" style="flex:1"><button id="workingMemoryLoad" class="small">查看当前记忆</button><span class="meta" id="workingMemoryMsg"></span></div>
 <div id="workingMemorySummary" style="white-space:pre-wrap">选择会话并查看当前话题与参与状态。</div>
 <details><summary>查看来源与完整快照</summary><pre id="workingMemoryOutput">（尚未加载）</pre></details>
@@ -4002,11 +4003,13 @@ async function loadWorkingMemorySettings() {
     document.getElementById('workingMemoryEnabled').checked = r.config?.workingMemory?.enabled !== false;
     document.getElementById('taskMemoryEnabled').checked = r.config?.workingMemory?.tasksEnabled !== false;
     document.getElementById('temporalRecallEnabled').checked = r.config?.workingMemory?.temporalRecall !== false;
+    document.getElementById('observationIntervalSeconds').value = (r.config?.workingMemory?.observationIntervalMs ?? 60000) / 1000;
   } catch {}
 }
 document.getElementById('workingMemorySave').addEventListener('click', async () => {
   const r = await api('/api/socialV2/config', 'POST', { workingMemory: { enabled: document.getElementById('workingMemoryEnabled').checked,
-    tasksEnabled: document.getElementById('taskMemoryEnabled').checked, temporalRecall: document.getElementById('temporalRecallEnabled').checked } });
+    tasksEnabled: document.getElementById('taskMemoryEnabled').checked, temporalRecall: document.getElementById('temporalRecallEnabled').checked,
+    observationIntervalMs: Number(document.getElementById('observationIntervalSeconds').value) * 1000 } });
   document.getElementById('workingMemoryMsg').textContent = r.ok ? '已保存，下批消息生效' : (r.error || '保存失败');
 });
 document.getElementById('workingMemoryLoad').addEventListener('click', async () => {
@@ -4079,6 +4082,12 @@ function formatWakeStatus(r) {
     next = '未设置时间';
   }
   lines.push(`<div><b>下次唤醒：</b>${esc(next)}</div>`);
+  if (r.wakeQuotaWait) {
+    lines.push(`<div><b>正在等待模型唤醒额度</b> · 本次等待截止 ${esc(new Date(r.wakeQuotaWait.deadline).toLocaleString())}</div>`);
+    if (r.wakeQuotaWait.resetsAt) lines.push(`<div>额度窗口恢复时间 ${esc(new Date(r.wakeQuotaWait.resetsAt).toLocaleString())}</div>`);
+  } else if (r.pendingWakeAt) {
+    lines.push(`<div><b>待执行批次：</b>${esc(r.pendingWakeReason || '')} · ${esc(new Date(r.pendingWakeAt).toLocaleString())}</div>`);
+  }
   const tr = wc.triggers || {};
   const conds = [];
   if (tr.atMention) conds.push('@');
