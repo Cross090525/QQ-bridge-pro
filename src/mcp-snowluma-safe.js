@@ -333,6 +333,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_get_active_members: 'getActiveMembers',
   qq_memory_append: 'memory',
   qq_memory: 'memory',
+  qq_memory_consolidate: 'memory',
   qq_memory_providers: 'memory',
   qq_memory_query: 'memory',
   qq_memory_remove: 'memory',
@@ -952,6 +953,21 @@ server.tool('qq_memory', '通过开放记忆接口调用插件。query: query/me
       headers: { 'x-agent-token': token }, timeoutMs: 200000 });
     return { content: [{ type: 'text', text: serializeModelData(result) }] };
   } catch (error) { return { content: [{ type: 'text', text: `记忆插件调用失败：${error.message}` }], isError: true }; }
+});
+
+server.tool('qq_memory_consolidate', '可靠整理当前会话普通事实。read列出候选，input可含status/offset/limit。stage需要text(归纳事实)、subject(实际userId)、category、assertion(self_report或inferred)、sources:[{id:已展示messages.id,quote:该消息原文短片段}]，可选providerId。引用片段只保存在本机，提供者收到归纳事实和来源指纹。先查重，纠错时stage另带supersedes与expectedHash(旧记录memoryRecordHash，query结果recordHash)。commit/verify/reject需要id与revision，可带approvalId。commit后状态unknown须verify，核验为applied才算落库；unknown不可直接重试commit。409时read重读，approval_required遵循管理审批。候选仅供维护，不是本轮来信或发言授权。需consolidation-v1提供者。', {
+  key: z.string(), token: z.string().min(1), operation: z.enum(['read','stage','commit','verify','reject']),
+  input: z.record(z.string(), z.unknown()).optional(),
+}, async ({ key, token, operation, input = {} }) => {
+  try {
+    const params = new URLSearchParams({ key });
+    for (const field of ['status','offset','limit']) if (input[field] !== undefined) params.set(field, String(input[field]));
+    const result = await agentApi('/api/v1/memory/consolidation' + (operation === 'read' ? '?' + params : ''), {
+      ...(operation === 'read' ? {} : { method: 'POST', body: JSON.stringify({ key, operation, input }) }),
+      headers: { 'x-agent-token': token }, timeoutMs: 200000,
+    });
+    return { content: [{ type: 'text', text: serializeModelData(result) }] };
+  } catch (error) { return { isError: true, content: [{ type: 'text', text: `记忆候选操作失败：${error.message}` }] }; }
 });
 
 server.tool('qq_task_memory', '读取和维护当前会话未完事项，不调度提醒、不授予发送权限。read: input可含query/status/offset/limit；update: revision、创建时text/ownerId/kind(continuation|bot_task|user_plan)、status(pending|in_progress|waiting|completed|cancelled)、waitingFor、dueAt(毫秒或null)、sources(已展示messages.id)。修改须带id，负责人不可变；完成/取消须有负责人的新来信依据，只表示用户报告。不要将随口一说建成任务。409时重读合并，已结束任务不重开。', {

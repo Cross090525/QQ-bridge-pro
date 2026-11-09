@@ -2,6 +2,7 @@
 export const BRIDGE_API_VERSION = '1';
 export const PUBLIC_API_ROUTES = Object.freeze([
   { method: 'GET', path: '/api/v1/memory/providers', target: '/api/memory/providers', flag: 'memory' },
+  ...['GET', 'POST'].map(method => ({ method, path: '/api/v1/memory/consolidation', target: '/api/socialV2/memory-consolidation', flag: 'memory' })),
   ...['query', 'write', 'update', 'delete', 'clear', 'ingest'].map(operation => ({ method: 'POST', path: `/api/v1/memory/${operation}`, target: `/api/memory/${operation}`, flag: 'memory' })),
   { method: 'GET', path: '/api/v1/content/services', target: '/api/socialV2/content-services', flag: 'contentServices' },
   { method: 'POST', path: '/api/v1/content/process', target: '/api/socialV2/content-process', flag: 'contentServices' },

@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { MEMORY_PROTOCOL, normalizeMemoryInput } from '../src/framework/memory-providers.mjs';
 import { temporalMetadata, selectTemporal } from '../src/core/temporal-memory.mjs';
+import { putConsolidated, selectConsolidated } from '../src/core/consolidated-memory.mjs';
 
 const RECORD = 'qq-bridge.haitang-entry/v1';
 const repo = fileURLToPath(new URL('..', import.meta.url));
@@ -66,13 +67,14 @@ export class HaitangMemoryProvider {
         const item = JSON.parse(row.content);
         if (item.protocol !== RECORD || item.id !== row.id || typeof item.text !== 'string') throw new Error('记忆记录不符合适配器格式');
         const { protocol, ...record } = item;
-        normalizeMemoryInput('write', record);
+        const { qqBridgeConsolidationState, ...metadata } = record.metadata ?? {};
+        normalizeMemoryInput('write', { ...record, metadata });
         return record;
       });
       const timestamps = new Map(raw.map(row => [row.id, row.ts]));
       const envelope = { protocol: MEMORY_PROTOCOL, namespace, requestId, operation };
       if (operation === 'query') {
-        let candidates = selectTemporal(records, input.options).filter(item => (!input.category || item.category === input.category)
+        let candidates = selectConsolidated(input.options.consolidation?.history ? records : selectTemporal(records, input.options), input.options).filter(item => (!input.category || item.category === input.category)
           && (!input.member || item.subject === input.member));
         if (input.query.trim()) {
           // BM25/CJK fuzzy ranking is upstream code, not a bridge-side algorithm.
@@ -87,6 +89,11 @@ export class HaitangMemoryProvider {
       let next = records.slice(); const affectedIds = [];
       const put = item => {
         normalizeMemoryInput('write', item);
+        if (item.metadata?.qqBridgeConsolidation || records.find(row => row.id === item.id)?.metadata?.qqBridgeConsolidation) {
+          if (upstream.detectSecrets(JSON.stringify(item)).length) throw new Error('内容疑似包含凭据，拒绝存入记忆');
+          const result = putConsolidated(next, item); next = result.records; affectedIds.push(...result.affectedIds); return;
+        }
+        if (records.find(row => row.id === item.id)?.metadata?.qqBridgeConsolidationState) throw new Error('已被替代的记忆不可覆盖');
         const old = records.find(row => row.id === item.id), temporal = temporalMetadata(item.metadata);
         if (old && JSON.stringify(old) === JSON.stringify(item)) return;
         if (old && temporalMetadata(old.metadata)) throw new Error('时效记忆不可覆盖，请用新id和supersedes建立纠正历史');

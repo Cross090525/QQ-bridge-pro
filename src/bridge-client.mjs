@@ -48,6 +48,8 @@ export class QQBridgeClient {
   workingContext({ query, messageId } = {}) { return this.request('/api/v1/working/context', { params: { query, messageId } }); }
   updateWorkingContext(input) { return this.request('/api/v1/working/context', { method: 'POST', body: input }); }
   tasks(params = {}) { return this.request('/api/v1/tasks', { params }); }
+  memoryCandidates(params = {}) { return this.request('/api/v1/memory/consolidation', { params }); }
+  consolidateMemory(operation, input = {}) { return this.request('/api/v1/memory/consolidation', { method: 'POST', body: { operation, input } }); }
   updateTask(input) { return this.request('/api/v1/tasks', { method: 'POST', body: input }); }
   queryContext(query) { return this.request('/api/v1/context/query', { method: 'POST', body: query }); }
   contentServices(sourceId) { return this.request('/api/v1/content/services', { params: { sourceId } }); }

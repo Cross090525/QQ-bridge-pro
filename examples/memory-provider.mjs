@@ -6,6 +6,8 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { MEMORY_PROTOCOL, normalizeMemoryInput } from '../src/framework/memory-providers.mjs';
+import { putConsolidated, selectConsolidated } from '../src/core/consolidated-memory.mjs';
+import { selectTemporal } from '../src/core/temporal-memory.mjs';
 
 export class ExampleMemoryStore {
   constructor({ filePath = null } = {}) {
@@ -38,8 +40,7 @@ export class ExampleMemoryStore {
     const matches = (item, selector) => Object.entries(selector).every(([key, value]) => !value || item[key] === value);
     if (operation === 'query') {
       const input = normalizeMemoryInput('query', request.input);
-      let items = existing.filter(item => (!item.expiresAt || item.expiresAt > Date.now())
-        && (!input.category || item.category === input.category)
+      let items = selectConsolidated(input.options.consolidation?.history ? existing : selectTemporal(existing, input.options), input.options).filter(item => (!input.category || item.category === input.category)
         && (!input.member || item.subject === input.member || item.metadata?.participants?.includes(input.member)));
       const terms = input.query.normalize('NFKC').toLowerCase().split(/\s+/).filter(Boolean);
       if (terms.length) items = items.filter(item => terms.some(term => JSON.stringify(item).normalize('NFKC').toLowerCase().includes(term)));
@@ -56,10 +57,14 @@ export class ExampleMemoryStore {
     if (operation === 'write') {
       const input = normalizeMemoryInput('write', request.input);
       const id = input.id ?? crypto.randomBytes(12).toString('hex');
-      next = next.filter(item => item.id !== id); next.push({ ...input, id, updatedAt: Date.now() }); affectedIds.push(id);
+      const result = putConsolidated(next, { ...input, id, updatedAt: Date.now() });
+      next = result.records; affectedIds.push(...result.affectedIds);
     } else if (operation === 'update') {
       const input = normalizeMemoryInput('update', request.input);
-      next = next.map(item => { if (!matches(item, input.selector)) return item; affectedIds.push(item.id); return { ...item, ...input.patch, updatedAt: Date.now() }; });
+      for (const item of existing.filter(item => matches(item, input.selector))) {
+        if (item.metadata?.qqBridgeConsolidation || item.metadata?.qqBridgeConsolidationState) throw new Error('Managed memory is immutable');
+        const result = putConsolidated(next, { ...item, ...input.patch, updatedAt: Date.now() }); next = result.records; affectedIds.push(...result.affectedIds);
+      }
     } else if (operation === 'delete' || operation === 'clear') {
       const input = normalizeMemoryInput(operation, request.input);
       const selector = operation === 'clear' ? { category: input.category } : input.selector;
