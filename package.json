@@ -95,6 +95,7 @@
     "test:memory:temporal-provider": "node --test scripts/test-temporal-provider.mjs",
     "test:memory:consolidation": "node --test scripts/test-memory-consolidation.mjs",
     "test:memory:consolidation-ui": "node scripts/test-memory-consolidation-ui.mjs",
+    "test:onebot-recovery": "node --test scripts/test-onebot-recovery.mjs scripts/test-snowluma-upstream-health.mjs",
     "test:memory:tasks-ui": "node scripts/test-task-memory-ui.mjs",
     "test:working-memory:ui": "node scripts/test-working-memory-ui.mjs"
   },

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(process.argv.find(arg => arg.startsWith('--root='))?.slice(7) || path.resolve(__dirname, '..'));
 
 const TARGETS = ['@snowluma/sdk', '@snowluma/mcp'];
 
@@ -46,3 +46,31 @@ for (const pkg of TARGETS) {
   total += patched;
 }
 console.log(`[patch-snowluma] 合计 ${total} 个文件`);
+
+// Node's WebSocket can emit error without close when an initial upgrade fails.
+// The SDK otherwise leaves connectPromise pending and never schedules a retry.
+const clientFile = path.join(ROOT, 'node_modules/@snowluma/sdk/dist/client/websocket-client.js');
+if (fs.existsSync(clientFile)) {
+  const source = fs.readFileSync(clientFile, 'utf8');
+  const marker = '// qq-bridge: settle initial WebSocket errors';
+  const before = `                addSocketListener(socket, 'error', (error) => {
+                    this.emitter.emit('error', unwrapEventPayload(error));
+                }),`;
+  const after = `                addSocketListener(socket, 'error', (error) => {
+                    ${marker}
+                    cleanup.forEach((off) => off());
+                    this.connectPromise = null;
+                    if (this.socket === socket) this.socket = null;
+                    reject(new SnowLumaConnectionError('SnowLuma WebSocket failed before opening'));
+                    this.emitter.emit('error', unwrapEventPayload(error));
+                    try { socket.close(); } catch {}
+                    this.handleClose([{ code: 1006, reason: 'initial connection failed' }]);
+                }),`;
+  if (source.includes(marker)) console.log('[patch-snowluma] initial WebSocket recovery already applied');
+  else if (source.split(before).length === 2) {
+    fs.writeFileSync(clientFile, source.replace(before, after));
+    console.log('[patch-snowluma] patched initial WebSocket error recovery');
+  } else {
+    throw new Error('Unrecognized SnowLuma SDK connection code; verify initial-error recovery before deployment');
+  }
+}
